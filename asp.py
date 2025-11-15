@@ -259,7 +259,7 @@ class GridSelectorWindow(QMainWindow):
         super().__init__()
         # 기본 제목 및 크기 설정
         # 프로그램 이름을 사용자 요구에 따라 변경합니다.
-        self.setWindowTitle("시퀀셜 셀럭터")
+        self.setWindowTitle("sequential selecter")
         # 초기 창 크기를 설정합니다. 너무 큰 값 대신 적절한 비율을 사용하여 OS마다 알맞은 크기를 보장합니다.
         self.resize(1400, 850)
 
