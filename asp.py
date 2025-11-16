@@ -8,21 +8,22 @@ from PIL import Image
 import pillow_heif
 
 from PySide6.QtCore import (
-    Qt, QSize, QThread, Signal, QObject
+    Qt, QSize, QThread, Signal, QObject, QEasingCurve, QPropertyAnimation, QRect, QPoint
 )
 from PySide6.QtGui import (
-    QImage, QPixmap
+    QImage, QPixmap, QDrag, QPainter, QColor, QPen
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel,
-    QMessageBox, QScrollArea, QSlider, QSplitter
+    QMessageBox, QScrollArea, QSlider, QSplitter,
+    QGraphicsOpacityEffect, QFrame, QGraphicsDropShadowEffect, QStyle, QRubberBand
 )
-from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QStyle
 
 from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect
 
 from PySide6.QtCore import QTimer
+from PySide6.QtCore import QEvent
 
 from collections import OrderedDict
 
@@ -97,7 +98,7 @@ class ThumbnailWorker(QObject):
     thumbnail_ready = Signal(str, QPixmap)
     finished = Signal()
 
-    def __init__(self, paths, thumb_size=160, parent=None):
+    def __init__(self, paths, thumb_size=300, parent=None):
         super().__init__(parent)
         self._paths = list(paths)
         self._thumb_size = thumb_size
@@ -120,6 +121,65 @@ class ThumbnailWorker(QObject):
                 print(f"썸네일 생성 실패: {path} - {e}")
                 continue
         self.finished.emit()
+
+
+# ------------------------------------------------------------
+# 썸네일을 표시하는 커스텀 위젯
+# ------------------------------------------------------------
+
+class ThumbnailWidget(QWidget):
+    """
+    리스트에서 각 이미지 항목을 표시하기 위한 위젯입니다. 이미지와 파일명을 수직으로 배치하고,
+    Material Design 가이드라인에서 권장하는 작은 타이포그래피와 색상을 사용합니다. 아이템
+    제거 시 페이드 아웃 애니메이션을 적용하기 위해 QGraphicsOpacityEffect를 사용할 수 있습니다.
+    """
+    def __init__(self, file_name: str, thumb_size: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        # 배경을 투명하게 하여 선택 박스가 위에 그려질 때 가려지지 않도록 합니다.
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        # 투명 배경을 설정합니다. 선택 박스나 러버 밴드가 위에 표시될 수 있도록
+        self.setStyleSheet("background: transparent;")
+        # 마우스 이벤트를 위젯에서 받아 처리하지 않고 부모 리스트로 전달하기 위해
+        # 투명한 마우스 이벤트 속성을 설정합니다. 이렇게 하면 드래그 영역 선택
+        # 및 클릭/더블클릭 이벤트가 QListWidget에 도달하여 올바르게 처리됩니다.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.thumb_size = thumb_size
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        # 이미지 라벨
+        self.image_label = QLabel()
+        self.image_label.setFixedSize(thumb_size, thumb_size)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        # 투명 배경을 사용하여 그리드 배경과 자연스럽게 어울립니다.
+        self.image_label.setStyleSheet("background: transparent;")
+        # 이미지 라벨도 마우스 이벤트를 처리하지 않고 부모로 전달합니다.
+        self.image_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.image_label)
+
+        # 파일명 라벨
+        self.name_label = QLabel(file_name)
+        self.name_label.setAlignment(Qt.AlignCenter)
+        # 작은 글씨 크기와 대비가 높은 색상을 사용합니다. 줄바꿈을 방지하기 위해 elide 옵션을 활용할 수 있습니다.
+        self.name_label.setStyleSheet("color: #E0E0E0; font-size: 9pt;")
+        self.name_label.setWordWrap(False)
+        # 파일명이 길 경우 가운데로 정렬한 채 잘립니다.
+        layout.addWidget(self.name_label)
+
+        # 이름 라벨 또한 마우스 이벤트를 부모로 전달합니다.
+        self.name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        """이미지 라벨에 썸네일을 설정합니다."""
+        if pixmap is not None and not pixmap.isNull():
+            self.image_label.setPixmap(pixmap.scaled(
+                self.thumb_size,
+                self.thumb_size,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            ))
 
 
 # ------------------------------------------------------------
@@ -165,17 +225,110 @@ class ImageListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 기본 썸네일 크기를 추적합니다. Ctrl+휠을 통해 변경됩니다.
-        self._thumb_size = 160
+        # 초기 버전에서 썸네일이 너무 작게 보인다는 피드백을 받아 기본 크기를 키웠습니다.
+        # 실제 사용자가 확대한 정도를 고려해 300픽셀로 설정하여 4열 배치 시 가독성을 높입니다.
+        self._thumb_size = 300
         # 여백을 줄여 썸네일 사이 공간을 최소화합니다.
         # 패딩 값은 가로/세로 여백으로 적용되며, Ctrl+휠로 확대/축소 시에도 유지됩니다.
         self._grid_padding_w = 20
-        self._grid_padding_h = 30
+        # 이미지 아래에 파일명을 표시하기 위해 충분한 여백을 확보합니다.
+        self._grid_padding_h = 50
+
+        # 드래그 시작 위치를 저장하기 위한 변수입니다. 이 값이 설정되어 있으면
+        # 마우스 이동 시 일정 거리 이상 이동하면 실제 드래그 작업을 시작합니다.
+        self._drag_start_pos: QPoint | None = None
+
+        # 사용자가 드래그로 영역 선택을 할 때 사용할 러버 밴드와 시작 좌표를 저장합니다.
+        self._rubber_band: QRubberBand | None = None
+        self._rubber_start_pos: QPoint | None = None
 
     def mousePressEvent(self, event):
-        item = self.itemAt(event.pos())
+        # 왼쪽 버튼 클릭 시 현재 위치를 기록하여 나중에 드래그 거리 판정에 사용합니다.
+        if event.button() == Qt.LeftButton:
+            try:
+                pos = event.position().toPoint()
+            except AttributeError:
+                pos = event.pos()
+            self._drag_start_pos = pos
+            self._rubber_start_pos = pos
+        # 기존 로직: modifier 정보와 함께 클릭 시그널을 전달합니다.
+        try:
+            pos_for_mod = event.position().toPoint()
+        except AttributeError:
+            pos_for_mod = event.pos()
+        item = self.itemAt(pos_for_mod)
         if item is not None:
             self.clicked_with_modifiers.emit(item, event.modifiers())
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 드래그 시작 위치가 기록되어 있고, 일정 거리 이상 이동한 경우 드래그를 시작합니다.
+        # 현재 마우스 위치
+        current_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+        # 드래그 이동 처리: 선택된 항목 위에서 일정 거리 이상 이동하면 드래그를 시작합니다.
+        if self._drag_start_pos is not None:
+            if (current_pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                start_item = self.itemAt(self._drag_start_pos)
+                if start_item is not None and start_item.isSelected():
+                    # 드래그를 시작하기 전에 영역 선택 밴드를 제거합니다.
+                    if self._rubber_band is not None:
+                        self._rubber_band.hide()
+                        self._rubber_band.deleteLater()
+                        self._rubber_band = None
+                        self._rubber_start_pos = None
+                    self.startDrag(Qt.MoveAction)
+                    self._drag_start_pos = None
+                    return
+        # 영역 선택 처리: 드래그 시작 위치가 설정되어 있고, 아직 드래그 작업이 시작되지 않았을 경우
+        if self._rubber_start_pos is not None:
+            if self._rubber_band is None:
+                # 러버 밴드를 생성하여 리스트의 viewport 위에 표시합니다. 선택 박스가 썸네일 위에 나타나도록 raise_ 호출.
+                self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+                # 스타일 지정: 점선 테두리와 반투명 배경을 사용합니다.
+                self._rubber_band.setStyleSheet(
+                    "border: 2px dashed #4CAF50; background-color: rgba(76, 175, 80, 80);"
+                )
+                self._rubber_band.setGeometry(QRect(self._rubber_start_pos, QSize()))
+                self._rubber_band.show()
+                # 선택 박스를 최상단에 표시하여 썸네일 및 텍스트 위에 나타나도록 합니다.
+                self._rubber_band.raise_()
+            # 러버 밴드 크기 업데이트
+            rect = QRect(self._rubber_start_pos, current_pos).normalized()
+            self._rubber_band.setGeometry(rect)
+            # 이동 중에도 러버 밴드를 최상단에 유지합니다.
+            if self._rubber_band is not None:
+                self._rubber_band.raise_()
+            # 기본 동작을 중단하여 내부 선택 로직이 실행되지 않도록 합니다.
+            return
+
+        # 기본 동작을 수행하여 단일 항목 선택 등이 정상 동작하도록 합니다.
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # 마우스 릴리즈 시 드래그 시작 위치를 초기화합니다.
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = None
+            # 영역 선택이 진행 중이었다면 선택을 확정하고 러버 밴드를 제거합니다.
+            if self._rubber_band is not None and self._rubber_start_pos is not None:
+                # 현재 러버 밴드 영역과 교차하는 아이템을 선택합니다.
+                selection_rect = self._rubber_band.geometry()
+                self._rubber_band.hide()
+                self._rubber_band.deleteLater()
+                self._rubber_band = None
+                # 선택 상태 초기화: Ctrl 키가 눌린 경우에는 기존 선택을 유지합니다.
+                modifiers = event.modifiers() if hasattr(event, 'modifiers') else QApplication.keyboardModifiers()
+                if not (modifiers & Qt.ControlModifier):
+                    # 기존 선택을 해제하고 새 선택만 유지
+                    self.clearSelection()
+                for i in range(self.count()):
+                    item = self.item(i)
+                    item_rect = self.visualItemRect(item)
+                    if selection_rect.intersects(item_rect):
+                        item.setSelected(True)
+                self._rubber_start_pos = None
+                # 기본 동작으로 넘어가지 않고 선택이 완료되었음을 표시합니다.
+                return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         """
@@ -190,7 +343,9 @@ class ImageListWidget(QListWidget):
             factor = 1.1 if delta_y > 0 else 0.9
             new_size = int(self._thumb_size * factor)
             # 최소/최대 크기 제한
-            new_size = max(80, min(320, new_size))
+            # 썸네일이 너무 작거나 너무 크게 변하지 않도록 범위를 조정합니다.
+            # 기본 크기를 크게 조정한 만큼 최대값도 넉넉하게 늘려 600까지 허용합니다.
+            new_size = max(80, min(600, new_size))
             self._thumb_size = new_size
             icon_size = QSize(self._thumb_size, self._thumb_size)
             # 그리드 크기는 여백을 고려하여 조정합니다.
@@ -204,6 +359,56 @@ class ImageListWidget(QListWidget):
             event.accept()
         else:
             super().wheelEvent(event)
+
+    def startDrag(self, supportedActions):
+        """
+        선택한 항목을 드래그할 때 표시되는 프리뷰를 꾸밈니다. 첫 번째 선택된 이미지의
+        썸네일을 가져와 투명한 배경 위에 그리며, 여러 장을 선택한 경우 반투명
+        오버레이와 숫자를 표시합니다. 이렇게 하면 기본 드래그 아이콘보다 세련된
+        시각적 피드백을 제공합니다.
+        """
+        items = self.selectedItems()
+        if not items:
+            return
+        drag = QDrag(self)
+        mime = self.mimeData(items)
+        drag.setMimeData(mime)
+
+        # 드래그 프리뷰용 pixmap 생성
+        size = self.iconSize()
+        if size.width() <= 0 or size.height() <= 0:
+            size = QSize(self._thumb_size, self._thumb_size)
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+
+        # 첫 번째 선택된 항목의 썸네일을 가져와 그립니다.
+        first_item = items[0]
+        widget = self.itemWidget(first_item)
+        src_pix = None
+        if widget and hasattr(widget, 'image_label'):
+            src_pix = widget.image_label.pixmap()
+        if src_pix is not None and not src_pix.isNull():
+            scaled = src_pix.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = (size.width() - scaled.width()) // 2
+            y = (size.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+
+        # 여러 장을 선택한 경우, 어두운 오버레이와 개수 표시
+        if len(items) > 1:
+            painter.fillRect(pixmap.rect(), QColor(0, 0, 0, 128))
+            painter.setPen(QPen(Qt.white))
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, str(len(items)))
+        painter.end()
+        drag.setPixmap(pixmap)
+        # 핫스팟을 픽스맵의 하단 중앙으로 지정하여 드래그 이미지가
+        # 선택한 썸네일과 파일명 위로 떠오르도록 합니다. 이렇게 하면 드래그 미리보기가
+        # 실제 항목을 가리지 않고 위쪽에 위치합니다.
+        drag.setHotSpot(QPoint(size.width() // 2, size.height()))
+
+        # 드래그 실행: 이동 동작을 사용하여 드래그되는 동안 마우스 커서가 이동 모양을 보입니다.
+        drag.exec(Qt.MoveAction)
 
 
 # ------------------------------------------------------------
@@ -241,14 +446,20 @@ class PannableScrollArea(QScrollArea):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        if event.modifiers() & Qt.ControlModifier and self._zoom_callback is not None:
+        """
+        마우스 휠로 줌 인/아웃을 수행합니다. 별도의 modifier 키를 누를 필요 없이
+        일반 휠 동작도 확대/축소를 담당합니다. Pan 동작은 마우스 드래그로 수행합니다.
+        """
+        # 스크롤 변위를 계산하여 확대/축소 단계를 결정합니다.
+        if self._zoom_callback is not None:
             delta_y = event.angleDelta().y()
             if delta_y != 0:
                 steps = delta_y / 120.0
                 self._zoom_callback(steps)
-            event.accept()
-        else:
-            super().wheelEvent(event)
+                event.accept()
+                return
+        # 줌 콜백이 없으면 기본 동작 수행
+        super().wheelEvent(event)
 
 
 # ------------------------------------------------------------
@@ -259,7 +470,7 @@ class GridSelectorWindow(QMainWindow):
         super().__init__()
         # 기본 제목 및 크기 설정
         # 프로그램 이름을 사용자 요구에 따라 변경합니다.
-        self.setWindowTitle("sequential selecter")
+        self.setWindowTitle("시퀀셜 셀럭터")
         # 초기 창 크기를 설정합니다. 너무 큰 값 대신 적절한 비율을 사용하여 OS마다 알맞은 크기를 보장합니다.
         self.resize(1400, 850)
 
@@ -273,6 +484,12 @@ class GridSelectorWindow(QMainWindow):
 
         self.target_click_mode: int | None = None
 
+        # 숫자 키를 누르고 있는 동안의 타겟. 1 또는 2. 키 릴리즈 시 처리 후 None으로 초기화됩니다.
+        self.key_down_target: int | None = None
+
+        # 키를 누르고 있는 동안 이동 동작이 발생했는지 여부. keyReleaseEvent에서 처리할 때 사용합니다.
+        self.moved_during_key_down: bool = False
+
         self.thumb_thread: QThread | None = None
         self.thumb_worker: ThumbnailWorker | None = None
 
@@ -285,6 +502,10 @@ class GridSelectorWindow(QMainWindow):
         # OrderedDict를 사용해 간단한 LRU 캐시를 구현합니다.
         self._preview_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._cache_capacity: int = 20
+
+        # 이동 애니메이션을 추적하기 위한 목록입니다. 애니메이션 객체를 저장해
+        # 가비지 컬렉션으로 인한 조기 종료를 방지합니다.
+        self._animations: list[QPropertyAnimation] = []
 
     # --------------------------------------------------------
     # 창 표시 이벤트 처리
@@ -369,6 +590,13 @@ class GridSelectorWindow(QMainWindow):
                 border: none;
                 padding: 4px;
             }
+
+            /* 선택된 아이템을 시각적으로 강조합니다. 녹색 테두리와 반투명 배경으로 선택 영역이 뚜렷하게 보입니다. */
+            QListWidget::item:selected {
+                background-color: rgba(76, 175, 80, 80);
+                border: 1px solid #4CAF50;
+                border-radius: 4px;
+            }
             /* Glass panel style to approximate Material surfaces: semi-transparent with subtle border */
             QFrame#glassPanel {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -376,6 +604,12 @@ class GridSelectorWindow(QMainWindow):
                                            stop:1 rgba(255, 255, 255, 5));
                 border: 1px solid rgba(255, 255, 255, 20);
                 border-radius: 16px;
+            }
+
+            /* 드래그 박스(다중 선택 사각형)를 세련되게 꾸밉니다. */
+            QRubberBand {
+                border: 2px dashed #4CAF50;
+                background-color: rgba(76, 175, 80, 40);
             }
         """
         self.setStyleSheet(dark_style)
@@ -451,6 +685,8 @@ class GridSelectorWindow(QMainWindow):
         self.list_widget.setDragEnabled(True)
         self.list_widget.setDragDropMode(QListWidget.DragOnly)
 
+        # 메인 윈도우가 리스트 위젯의 키 이벤트를 처리할 수 있도록 이벤트 필터를 설치합니다.
+        self.list_widget.installEventFilter(self)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.list_widget.clicked_with_modifiers.connect(self.on_item_clicked_with_modifiers)
 
@@ -659,11 +895,12 @@ class GridSelectorWindow(QMainWindow):
             "- 클릭: Slot1 프리뷰에 표시\n"
             "- Ctrl + 클릭: Slot2 프리뷰에 표시\n"
             "- 더블클릭: 해당 사진을 Target1 폴더로 이동\n"
-            "- 1 키 누른 상태 + 클릭: 클릭한 사진만 Target1 폴더로 이동\n"
-            "- 2 키 누른 상태 + 클릭: 클릭한 사진만 Target2 폴더로 이동\n"
+            "- 1 키 누른 상태 + 클릭: 키를 누르고 있는 동안 클릭한 사진을 Target1 폴더로 이동 (Target1만 설정되어도 동작)\n"
+            "- 2 키 누른 상태 + 클릭: 키를 누르고 있는 동안 클릭한 사진을 Target2 폴더로 이동 (Target2만 설정되어도 동작)\n"
+            "- 키를 떼었을 때 선택된 사진이 없으면 다음 클릭에서 이동 (1 또는 2 키)\n"
             "- 드래그 박스: 여러 장 선택\n"
-            "- 드래그 선택 후 1: 선택된 모든 사진을 Target1 폴더로 이동\n"
-            "- 드래그 선택 후 2: 선택된 모든 사진을 Target2 폴더로 이동\n\n"
+            "- 드래그 선택 후 1 키를 눌렀다 놓기: 선택된 모든 사진을 Target1 폴더로 이동\n"
+            "- 드래그 선택 후 2 키를 눌렀다 놓기: 선택된 모든 사진을 Target2 폴더로 이동\n\n"
             "■ 프리뷰 창\n"
             "- 마우스 왼쪽 드래그: 이미지 패닝(이동)\n"
             "- Ctrl + 마우스 휠: 줌 인/아웃\n"
@@ -692,25 +929,56 @@ class GridSelectorWindow(QMainWindow):
         key = event.key()
         selected = self.list_widget.selectedItems()
 
-        # 새 단축키: 드래그 선택 후 1/2만 눌러서 이동 (선택 개수 2장 이상일 때)
-        if key == Qt.Key_1 and self.target_folder1 is not None and len(selected) >= 2:
-            self.move_items_to_folder(selected, self.target_folder1)
+        # 다중 선택 시 바로 이동: 선택된 항목이 있다면 1 또는 2 키를 눌러 해당 타겟으로 이동합니다.
+        # 숫자키 1 또는 2가 눌렸을 때: 키를 누르고 있는 동안의 타겟을 설정합니다.
+        # 이동 동작은 keyReleaseEvent 또는 클릭 이벤트에서 처리됩니다.
+        if key == Qt.Key_1 and self.target_folder1 is not None:
+            self.key_down_target = 1
             return
-        if key == Qt.Key_2 and self.target_folder2 is not None and len(selected) >= 2:
-            self.move_items_to_folder(selected, self.target_folder2)
+        if key == Qt.Key_2 and self.target_folder2 is not None:
+            self.key_down_target = 2
             return
 
-        # 그 외에는 기존 1+클릭 / 2+클릭 모드 유지
-        if key == Qt.Key_1:
-            self.target_click_mode = 1
-        elif key == Qt.Key_2:
-            self.target_click_mode = 2
-
+        # 기타 키 이벤트는 기본 처리에 위임합니다.
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
-        if event.key() in (Qt.Key_1, Qt.Key_2):
-            self.target_click_mode = None
+        # 숫자 키(1,2) 릴리즈 시: 선택된 항목을 이동하거나 다음 클릭에서 이동하도록 설정합니다.
+        if event.key() == Qt.Key_1 and self.target_folder1 is not None:
+            # 1번 키 릴리즈
+            if self.key_down_target == 1:
+                if self.moved_during_key_down:
+                    # 키를 누른 상태에서 이미 이동이 발생했다면 추가 모드를 설정하지 않음
+                    self.target_click_mode = None
+                    self.moved_during_key_down = False
+                else:
+                    selected = self.list_widget.selectedItems()
+                    if len(selected) > 0:
+                        self.move_selected_to_target(1)
+                        self.target_click_mode = None
+                    else:
+                        # 선택된 항목이 없으면 다음 클릭에서 이동하도록 설정
+                        self.target_click_mode = 1
+            self.key_down_target = None
+            super().keyReleaseEvent(event)
+            return
+        if event.key() == Qt.Key_2 and self.target_folder2 is not None:
+            # 2번 키 릴리즈
+            if self.key_down_target == 2:
+                if self.moved_during_key_down:
+                    self.target_click_mode = None
+                    self.moved_during_key_down = False
+                else:
+                    selected = self.list_widget.selectedItems()
+                    if len(selected) > 0:
+                        self.move_selected_to_target(2)
+                        self.target_click_mode = None
+                    else:
+                        self.target_click_mode = 2
+            self.key_down_target = None
+            super().keyReleaseEvent(event)
+            return
+
         super().keyReleaseEvent(event)
 
     # --------------------------------------------------------
@@ -763,7 +1031,14 @@ class GridSelectorWindow(QMainWindow):
     # --------------------------------------------------------
     def load_folder_grid(self, folder: Path):
         self._stop_thumb_thread()
+        # 새로운 폴더를 선택할 때 썸네일 리스트를 초기화하고 현재 썸네일 크기와 그리드 크기를 다시 설정합니다.
         self.list_widget.clear()
+        # 현재 리스트 위젯의 썸네일 크기에 맞춰 아이콘 크기와 그리드 크기를 재설정합니다.
+        thumb_size = self.list_widget._thumb_size
+        pad_w = self.list_widget._grid_padding_w
+        pad_h = self.list_widget._grid_padding_h
+        self.list_widget.setIconSize(QSize(thumb_size, thumb_size))
+        self.list_widget.setGridSize(QSize(thumb_size + pad_w, thumb_size + pad_h))
 
         all_files = []
         for entry in sorted(folder.iterdir()):
@@ -776,33 +1051,78 @@ class GridSelectorWindow(QMainWindow):
 
         for path_str in all_files:
             p = Path(path_str)
-            # 아이템 텍스트를 제거하여 썸네일이 전면에 보이도록 합니다.
-            item = QListWidgetItem("")
+            # QListWidgetItem을 생성하고 파일 경로를 저장합니다.
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, path_str)
-            # 파일명을 툴팁으로 제공하여 필요시 표시할 수 있도록 합니다.
+            # 파일명을 툴팁으로 설정하여 필요 시 전체 이름을 확인할 수 있습니다.
             item.setToolTip(p.name)
-            # 텍스트 중앙 정렬은 필요 없으므로 제거합니다.
+            # 커스텀 썸네일 위젯을 생성하여 이미지와 파일명을 표시합니다.
+            thumb_widget = ThumbnailWidget(p.name, self.list_widget._thumb_size)
+            # 투명한 플레이스홀더를 설정하여 초기 셀 크기가 유지되도록 합니다.
+            placeholder = QPixmap(self.list_widget._thumb_size, self.list_widget._thumb_size)
+            placeholder.fill(Qt.transparent)
+            thumb_widget.set_pixmap(placeholder)
             self.list_widget.addItem(item)
+            # 아이템에 위젯을 배치합니다.
+            self.list_widget.setItemWidget(item, thumb_widget)
+            # 각 항목의 추천 크기를 설정하여 커스텀 위젯이 올바르게 표시되도록 합니다.
+            item.setSizeHint(QSize(thumb_size + pad_w, thumb_size + pad_h))
 
-        # 이름순으로 정렬하여 원하는 사진을 더 쉽게 찾을 수 있도록 합니다.
-        self.list_widget.sortItems(Qt.AscendingOrder)
+        # QListWidgetItem의 정렬을 수행하지 않습니다. 파일 목록은 이미 사전 정렬되어 있으며,
+        # 항목을 정렬하면 인덱스와 파일 매핑이 변경되어 썸네일이 올바르게 표시되지 않을 수 있습니다.
 
-        self.thumb_thread = QThread()
-        self.thumb_worker = ThumbnailWorker(all_files, thumb_size=160)
-        self.thumb_worker.moveToThread(self.thumb_thread)
-        self.thumb_thread.started.connect(self.thumb_worker.run)
-        self.thumb_worker.thumbnail_ready.connect(self.on_thumbnail_ready)
-        self.thumb_worker.finished.connect(self.thumb_thread.quit)
-        self.thumb_worker.finished.connect(self.thumb_worker.deleteLater)
-        self.thumb_thread.finished.connect(self.thumb_thread.deleteLater)
-        self.thumb_thread.start()
+        # 스레드를 사용하지 않고 즉시 썸네일을 생성하여 목록에 표시합니다.
+        # 많은 파일을 처리할 경우 UI의 응답성을 위해 이벤트 루프를 간헐적으로 처리합니다.
+        for idx, path_str in enumerate(all_files):
+            # 로딩 중 사용자가 다른 폴더를 선택했을 경우 중단합니다.
+            if self.current_folder != folder:
+                break
+            path_obj = Path(path_str)
+            try:
+                img = load_pil_image(path_obj, max_size=self.list_widget._thumb_size)
+                qimg = pil_to_qimage(img)
+                pixmap = QPixmap.fromImage(qimg)
+                if not pixmap.isNull():
+                    item = self.list_widget.item(idx)
+                    if item is not None:
+                        # 커스텀 위젯을 가져와 썸네일을 설정합니다.
+                        widget = self.list_widget.itemWidget(item)
+                        if isinstance(widget, ThumbnailWidget):
+                            widget.set_pixmap(pixmap)
+            except Exception:
+                pass
+            QApplication.processEvents()
+
+        # 썸네일이 모두 설정되었으므로 리스트를 업데이트합니다.
+        self.list_widget.updateGeometry()
+        self.list_widget.repaint()
 
     def _stop_thumb_thread(self):
+        # 워커와 스레드가 존재하면 안전하게 중지하고 리소스를 정리합니다.
         if self.thumb_worker is not None:
-            self.thumb_worker.abort()
+            try:
+                self.thumb_worker.abort()
+            except Exception:
+                pass
         if self.thumb_thread is not None:
-            self.thumb_thread.quit()
-            self.thumb_thread.wait()
+            try:
+                # 이미 삭제된 스레드에 대해 quit를 호출하면 RuntimeError가 발생할 수 있으므로 예외 처리합니다.
+                self.thumb_thread.quit()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            try:
+                self.thumb_thread.wait()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            try:
+                # finished 시 자동 deleteLater를 연결하지 않았으므로 직접 삭제합니다.
+                self.thumb_thread.deleteLater()
+            except Exception:
+                pass
         self.thumb_worker = None
         self.thumb_thread = None
 
@@ -830,12 +1150,25 @@ class GridSelectorWindow(QMainWindow):
         if not path_str:
             return
 
-        # 1+클릭 / 2+클릭
-        if self.target_folder1 and self.target_folder2 and self.target_click_mode in (1, 2):
-            if self.target_click_mode == 1:
-                self.move_items_to_folder([item], self.target_folder1)
-            elif self.target_click_mode == 2:
-                self.move_items_to_folder([item], self.target_folder2)
+        # 키를 누르고 있는 동안 클릭: 즉시 이동
+        if self.key_down_target == 1 and self.target_folder1 is not None:
+            self.move_items_to_folder([item], self.target_folder1)
+            # 키를 누른 상태에서 이동이 발생했음을 기록하여 keyRelease 처리 시 재이동을 방지합니다.
+            self.moved_during_key_down = True
+            return
+        if self.key_down_target == 2 and self.target_folder2 is not None:
+            self.move_items_to_folder([item], self.target_folder2)
+            self.moved_during_key_down = True
+            return
+
+        # 키를 눌렀다 놓은 후 첫 클릭: pending 모드
+        if self.target_click_mode == 1 and self.target_folder1 is not None:
+            self.move_items_to_folder([item], self.target_folder1)
+            self.target_click_mode = None
+            return
+        if self.target_click_mode == 2 and self.target_folder2 is not None:
+            self.move_items_to_folder([item], self.target_folder2)
+            self.target_click_mode = None
             return
 
         # Ctrl + 클릭 → Slot2
@@ -992,7 +1325,7 @@ class GridSelectorWindow(QMainWindow):
         self.move_items_to_folder(items, folder)
 
     def move_items_to_folder(self, items, folder: Path):
-        remove_rows = []
+        """선택된 항목들을 지정된 폴더로 이동하고, 이동된 항목은 페이드 아웃 애니메이션으로 제거합니다."""
         for item in items:
             path_str = item.data(Qt.UserRole)
             if not path_str:
@@ -1001,24 +1334,73 @@ class GridSelectorWindow(QMainWindow):
             if not src.exists():
                 continue
 
+            # 대상 경로를 계산하고 이름 충돌을 회피합니다.
             dst = folder / src.name
-            try:
-                base = dst.stem
-                ext = dst.suffix
-                i = 1
-                while dst.exists():
-                    dst = folder / f"{base}_{i}{ext}"
-                    i += 1
+            base = dst.stem
+            ext = dst.suffix
+            i = 1
+            while dst.exists():
+                dst = folder / f"{base}_{i}{ext}"
+                i += 1
 
+            try:
                 shutil.move(str(src), str(dst))
-                row = self.list_widget.row(item)
-                remove_rows.append(row)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"파일 이동 실패:\n{e}")
                 return
 
-        for row in sorted(remove_rows, reverse=True):
+            # 실제 파일을 이동한 후 리스트에서 항목을 페이드 아웃시키면서 제거합니다.
+            self.animate_item_removal(item)
+
+    # --------------------------------------------------------
+    # 항목 제거 애니메이션
+    # --------------------------------------------------------
+    def animate_item_removal(self, item: QListWidgetItem):
+        """
+        지정된 리스트 항목에 페이드 아웃 애니메이션을 적용한 뒤 리스트에서 제거합니다.
+        Material Design의 페이드 패턴에서는 UI 요소가 화면 내에서 사라질 때
+        불투명도가 빠르게 감소하여 사용자에게 자연스러운 전환을 제공합니다【91608521861655†L1262-L1279】.
+        또한 작은 요소에는 75~150ms 사이의 짧은 애니메이션을 사용하도록 권장합니다【91608521861655†L1348-L1352】.
+        """
+        # 해당 항목에 연결된 커스텀 위젯을 가져옵니다.
+        widget = self.list_widget.itemWidget(item)
+        if widget is None:
+            # 커스텀 위젯이 없으면 즉시 제거
+            row = self.list_widget.row(item)
             self.list_widget.takeItem(row)
+            return
+
+        # 불투명도 효과를 적용합니다.
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        # 애니메이션 생성
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        # 애니메이션 지속 시간을 Material Motion 가이드라인에 따라 설정합니다.
+        anim.setDuration(120)  # 작은 요소에는 짧은 지속 시간을 사용
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        # 입출력 곡선: 빠르게 시작하여 서서히 사라지도록 합니다.
+        anim.setEasingCurve(QEasingCurve.InQuad)
+
+        def on_finished():
+            # 애니메이션이 끝나면 리스트에서 항목을 제거하고 위젯을 삭제합니다.
+            row = self.list_widget.row(item)
+            if row >= 0:
+                self.list_widget.takeItem(row)
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
+            # 애니메이션 객체를 목록에서 제거하여 메모리를 해제합니다.
+            try:
+                self._animations.remove(anim)
+            except ValueError:
+                pass
+
+        anim.finished.connect(on_finished)
+        # 애니메이션 객체를 저장하여 가비지 컬렉션을 방지합니다.
+        self._animations.append(anim)
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     # --------------------------------------------------------
     # 종료 처리
@@ -1027,14 +1409,21 @@ class GridSelectorWindow(QMainWindow):
         self._stop_thumb_thread()
         super().closeEvent(event)
 
-    def _stop_thumb_thread(self):
-        if self.thumb_worker is not None:
-            self.thumb_worker.abort()
-        if self.thumb_thread is not None:
-            self.thumb_thread.quit()
-            self.thumb_thread.wait()
-        self.thumb_worker = None
-        self.thumb_thread = None
+    # 이벤트 필터를 통해 리스트 위젯의 키 이벤트를 메인 윈도우로 전달합니다.
+    def eventFilter(self, obj, event):
+        # 리스트 위젯에서 발생한 키 이벤트를 메인 윈도우의 핸들러로 전달합니다.
+        if obj is self.list_widget:
+            if event.type() == QEvent.KeyPress:
+                # 메인 윈도우의 keyPressEvent를 호출합니다.
+                self.keyPressEvent(event)
+                return True
+            if event.type() == QEvent.KeyRelease:
+                self.keyReleaseEvent(event)
+                return True
+        # 그 외의 경우 기본 동작 유지
+        return super().eventFilter(obj, event)
+
+    # 중복된 _stop_thumb_thread 정의 제거: 안전한 스레드 정지 로직은 상단에 정의되어 있습니다.
 
 
 # ------------------------------------------------------------
