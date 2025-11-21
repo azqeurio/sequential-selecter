@@ -45,7 +45,7 @@ asp.py가 있는 프로젝트 디렉터리로 이동한 후 다음 명령을 실
 pyinstaller \
   --name "Sequential Selector" \
   --windowed \
-  asp.py
+  sqs.py
 ```
 
 ## 라이선스
