@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 import rawpy
+import io
 from PIL import Image
 import pillow_heif
 
@@ -56,14 +57,90 @@ def load_pil_image(path: Path, max_size: int | None = None) -> Image.Image:
             "raw"
         )
     elif ext in {".arw", ".cr2", ".cr3", ".nef", ".rw2", ".orf", ".raf", ".dng"}:
-        with rawpy.imread(str(path)) as raw:
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                no_auto_bright=True,
-                output_bps=8,
-                half_size=True
-            )
-        img = Image.fromarray(rgb)
+        """
+        RAW 포맷은 여러 단계를 거쳐 로드합니다.
+
+        1. 니콘 NEF의 경우 VibeCulling과 동일하게 먼저 내장 썸네일을 추출합니다. 이는
+           고효율(★) 압축 NEF에서 rawpy의 postprocess가 실패하는 경우에도 프리뷰를
+           표시하기 위한 방법입니다.
+        2. 그 외의 RAW는 rawpy.postprocess를 통해 디코딩을 시도하고, 실패하면 썸네일을
+           추출합니다.
+        3. rawpy 자체가 파일을 열지 못하면 HEIF 및 일반 Pillow 로더를 차례로 시도합니다.
+        """
+        # 먼저 NIikon NEF에 특화된 처리: 썸네일 우선 추출.
+        if ext == ".nef":
+            try:
+                with rawpy.imread(str(path)) as raw:
+                    try:
+                        thumb = raw.extract_thumb()
+                        if thumb.format == rawpy.ThumbFormat.JPEG:
+                            img = Image.open(io.BytesIO(thumb.data))
+                        elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                            img = Image.fromarray(thumb.data)
+                        else:
+                            img = None
+                        if img is not None:
+                            # orientation 등의 추가 처리가 필요하다면 여기서 수행할 수 있습니다.
+                            pass
+                        else:
+                            # 썸네일 형식을 지원하지 않으면 postprocess로 시도합니다.
+                            rgb = raw.postprocess(
+                                use_camera_wb=True,
+                                no_auto_bright=True,
+                                output_bps=8,
+                                half_size=True
+                            )
+                            img = Image.fromarray(rgb)
+                    except Exception:
+                        # 썸네일 추출 또는 postprocess 실패 시 예외 발생 시 다음 단계로 넘어갑니다.
+                        raise
+            except Exception:
+                # rawpy에서 파일을 읽지 못한 경우 아래 일반 RAW 처리 루틴으로 넘어갑니다.
+                img = None
+        else:
+            img = None
+        # NEF에서 내장 썸네일을 추출했거나 기타 RAW에서 postprocess를 수행한 경우 img가 설정됩니다.
+        if img is None:
+            try:
+                with rawpy.imread(str(path)) as raw:
+                    try:
+                        rgb = raw.postprocess(
+                            use_camera_wb=True,
+                            no_auto_bright=True,
+                            output_bps=8,
+                            half_size=True
+                        )
+                        img = Image.fromarray(rgb)
+                    except Exception:
+                        # 일반 RAW에서도 postprocess가 실패하면 썸네일을 추출합니다.
+                        try:
+                            thumb = raw.extract_thumb()
+                            if thumb.format == rawpy.ThumbFormat.JPEG:
+                                img = Image.open(io.BytesIO(thumb.data))
+                            elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                                img = Image.fromarray(thumb.data)
+                            else:
+                                img = None
+                        except Exception:
+                            img = None
+            except Exception:
+                img = None
+        # rawpy 경로에서 img를 얻지 못한 경우 HEIF나 Pillow 로더를 시도합니다.
+        if img is None:
+            try:
+                heif_file = pillow_heif.read_heif(str(path))
+                img = Image.frombytes(
+                    heif_file.mode,
+                    heif_file.size,
+                    heif_file.data,
+                    "raw"
+                )
+            except Exception:
+                try:
+                    img = Image.open(str(path))
+                    img.load()
+                except Exception:
+                    raise
     else:
         img = Image.open(str(path))
         img.load()
