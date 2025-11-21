@@ -23,6 +23,8 @@
 
 ### 1. 사전 요구 사항
 
+windows 에서는 release에서 exe 받아서 쓰면됩니다.
+
 macOS에서 빌드를 진행하기 위해 다음 항목이 필요합니다.
 
 - macOS 12 이상 (Apple Silicon 권장)
