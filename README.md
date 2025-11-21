@@ -5,35 +5,39 @@
 ## 주요 기능
 
 * **그리드 썸네일 뷰** – 선택된 폴더의 이미지가 정사각형 썸네일로 표시되며 Ctrl+마우스 휠을 사용해 썸네일 크기를 확대/축소할 수 있습니다.
-* **프리뷰 슬롯** – 두 개의 독립적인 프리뷰 영역에서 사진을 확대/축소하며 비교할 수 있습니다. 슬라이더로 확대 비율을 조절하거나 Ctrl+마우스 휠로 직접 조절할 수 있습니다.
+* **프리뷰 슬롯** – 두 개의 독립적인 프리뷰 영역에서 사진을 확대/축소하며 비교할 수 있습니다. 슬라이더로 확대 비율을 조절하거나 마우스 휠로 직접 조절할 수 있습니다.
 * **드래그 & 드롭** – 선택된 이미지를 하단의 Target 버튼으로 끌어다 놓아 다른 폴더로 이동할 수 있습니다.
 * **단축키** – 숫자 키 1/2를 이용해 선택한 이미지를 각각 Target1/Target2 폴더로 신속하게 이동할 수 있으며, 키를 누른 상태에서 썸네일을 클릭하면 단일 파일도 바로 이동할 수 있습니다.
 
 
-## 설치 방법
+### 1. 사전 요구 사항
 
-1. Python 3.9 이상을 준비합니다.
-2. 저장소를 클론한 뒤 의존성 패키지를 설치합니다:
+macOS에서 빌드를 진행하기 위해 다음 항목이 필요합니다.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+- macOS 12 이상 (Apple Silicon 권장)
+- Python 3.10 이상  
+  (Homebrew 또는 python.org의 **universal2** 버전 권장)
 
-3. 애플리케이션을 실행합니다:
 
-   ```bash
-   python asp.py
-   ```
+### 2. 개발 환경 준비
 
-이후 `Image Folder` 버튼을 눌러 이미지를 포함한 폴더를 선택하고, Target 폴더를 지정하여 사진을 분류하면 됩니다.
+아래 명령어를 순서대로 실행하여 필수 패키지를 설치합니다
+```
+python3 -m pip install --upgrade pip
+python3 -m pip install PySide6 rawpy pillow pillow-heif
+python3 -m pip install pyinstaller
+```
+### 3. .app 파일 생성
 
-## 의존성
-
-* [PySide6](https://pypi.org/project/PySide6/) – Qt6 기반 GUI 라이브러리
-* [Pillow](https://pypi.org/project/Pillow/) – 이미지 로딩/처리를 위한 라이브러리
-* [pillow-heif](https://pypi.org/project/pillow-heif/) – HEIF/HEIC 이미지 포맷 지원
-* [rawpy](https://pypi.org/project/rawpy/) – RAW 이미지 파일 로딩
+asp.py가 있는 프로젝트 디렉터리로 이동한 후 다음 명령을 실행합니다:
+```
+pyinstaller \
+  --name "Sequential Selector" \
+  --windowed \
+  asp.py
+```
 
 ## 라이선스
+
 
 이 프로젝트는 MIT 라이선스 하에 제공됩니다. 자세한 내용은 `LICENSE` 파일을 참조하십시오.
