@@ -8,7 +8,8 @@ from PIL import Image
 import pillow_heif
 
 from PySide6.QtCore import (
-    Qt, QSize, QThread, Signal, QObject, QEasingCurve, QPropertyAnimation, QRect, QPoint
+    Qt, QSize, QThread, Signal, QObject, QEasingCurve, QPropertyAnimation, QRect, QPoint,
+    QMetaObject,
 )
 from PySide6.QtGui import (
     QImage, QPixmap, QDrag, QPainter, QColor, QPen
@@ -17,7 +18,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel,
     QMessageBox, QScrollArea, QSlider, QSplitter,
-    QGraphicsOpacityEffect, QFrame, QGraphicsDropShadowEffect, QStyle, QRubberBand
+    QGraphicsOpacityEffect, QFrame, QGraphicsDropShadowEffect, QStyle, QRubberBand,
+    QSizePolicy
 )
 
 from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect
@@ -26,6 +28,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtCore import QEvent
 
 from collections import OrderedDict
+import concurrent.futures
 
 
 # ------------------------------------------------------------
@@ -466,6 +469,8 @@ class PannableScrollArea(QScrollArea):
 # 메인 윈도우
 # ------------------------------------------------------------
 class GridSelectorWindow(QMainWindow):
+    # 비동기 로딩된 썸네일을 메인 스레드에서 처리하기 위한 시그널
+    thumbnail_loaded = Signal(str, QImage)
     def __init__(self):
         super().__init__()
         # 기본 제목 및 크기 설정
@@ -506,6 +511,24 @@ class GridSelectorWindow(QMainWindow):
         # 이동 애니메이션을 추적하기 위한 목록입니다. 애니메이션 객체를 저장해
         # 가비지 컬렉션으로 인한 조기 종료를 방지합니다.
         self._animations: list[QPropertyAnimation] = []
+
+        # 스레드 풀을 사용하여 썸네일을 병렬로 로딩합니다. CPU 코어 수에 따라 워커 수를 결정합니다.
+        # 폴더 로드 버전을 추적하여 이전 로딩 작업이 완료되어도 최신 폴더에 영향을 주지 않도록 합니다.
+        try:
+            max_workers = os.cpu_count() or 4
+        except Exception:
+            max_workers = 4
+        self.thumb_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers
+        )
+        self.thumb_load_version: int = 0
+
+        # 스레드풀에서 로딩된 썸네일을 UI에 적용하기 위한 시그널 연결
+        self.thumbnail_loaded.connect(self._apply_thumbnail)
+
+        # 듀얼 모드 상태
+        self.dual_mode_enabled: bool = False
+        self.dual_window: QMainWindow | None = None
 
     # --------------------------------------------------------
     # 창 표시 이벤트 처리
@@ -633,10 +656,10 @@ class GridSelectorWindow(QMainWindow):
         self.splitter_main.addWidget(left_widget)
 
         # 오른쪽
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_widget.setMinimumWidth(150)
-        self.splitter_main.addWidget(right_widget)
+        self.right_widget = QWidget()
+        self.right_layout = QVBoxLayout(self.right_widget)
+        self.right_widget.setMinimumWidth(150)
+        self.splitter_main.addWidget(self.right_widget)
 
         # 초기 3:1 비율
         self.splitter_main.setStretchFactor(0, 3)
@@ -706,8 +729,9 @@ class GridSelectorWindow(QMainWindow):
         left_layout.addWidget(list_frame, 1)
 
         # 오른쪽: 수직 스플리터
-        splitter_right = QSplitter(Qt.Vertical)
-        right_layout.addWidget(splitter_right)
+        # 수직 스플리터를 속성으로 저장하여 듀얼 모드에서 재배치할 수 있도록 합니다.
+        self.splitter_right = QSplitter(Qt.Vertical)
+        self.right_layout.addWidget(self.splitter_right)
 
         # Slot1 패널: 프리뷰 영역과 컨트롤을 글래스 패널로 감쌉니다.
         slot1_frame = QFrame()
@@ -721,7 +745,7 @@ class GridSelectorWindow(QMainWindow):
         shadow1.setOffset(0, 8)
         shadow1.setColor(Qt.black)
         slot1_frame.setGraphicsEffect(shadow1)
-        splitter_right.addWidget(slot1_frame)
+        self.splitter_right.addWidget(slot1_frame)
 
         self.preview_scroll_1 = PannableScrollArea(
             zoom_callback=lambda steps: self.on_zoom_step(0, steps)
@@ -768,7 +792,7 @@ class GridSelectorWindow(QMainWindow):
         shadow2.setOffset(0, 8)
         shadow2.setColor(Qt.black)
         slot2_frame.setGraphicsEffect(shadow2)
-        splitter_right.addWidget(slot2_frame)
+        self.splitter_right.addWidget(slot2_frame)
 
         self.preview_scroll_2 = PannableScrollArea(
             zoom_callback=lambda steps: self.on_zoom_step(1, steps)
@@ -798,12 +822,12 @@ class GridSelectorWindow(QMainWindow):
         slot2_ctrl_layout.addWidget(self.btn_clear_2)
         slot2_layout.addLayout(slot2_ctrl_layout)
 
-        splitter_right.setStretchFactor(0, 1)
-        splitter_right.setStretchFactor(1, 1)
+        self.splitter_right.setStretchFactor(0, 1)
+        self.splitter_right.setStretchFactor(1, 1)
 
         # 아래쪽: 드롭 타겟 + 줌 링크 + 단축키 안내
         bottom_layout = QHBoxLayout()
-        right_layout.addLayout(bottom_layout)
+        self.right_layout.addLayout(bottom_layout)
 
         self.drop_label1 = DropLabel("Drag & Drop → Target1", self, 1)
         self.drop_label2 = DropLabel("Drag & Drop → Target2", self, 2)
@@ -823,6 +847,13 @@ class GridSelectorWindow(QMainWindow):
         self.btn_shortcuts.clicked.connect(self.show_shortcuts)
         self.btn_shortcuts.setFixedHeight(32)
         bottom_layout.addWidget(self.btn_shortcuts)
+
+        # 듀얼 모드 토글 버튼: 그리드와 프리뷰를 별도 창으로 분리/합치기
+        self.btn_dual_mode = QPushButton("듀얼 모드")
+        self.btn_dual_mode.setCheckable(True)
+        self.btn_dual_mode.setFixedHeight(32)
+        self.btn_dual_mode.toggled.connect(self.toggle_dual_mode)
+        bottom_layout.addWidget(self.btn_dual_mode)
 
     # --------------------------------------------------------
     # 스크롤 동기화
@@ -1030,72 +1061,109 @@ class GridSelectorWindow(QMainWindow):
     # 폴더 로딩
     # --------------------------------------------------------
     def load_folder_grid(self, folder: Path):
+        # 이전 버전의 썸네일 로딩을 중단합니다.
         self._stop_thumb_thread()
-        # 새로운 폴더를 선택할 때 썸네일 리스트를 초기화하고 현재 썸네일 크기와 그리드 크기를 다시 설정합니다.
+        # 새 로딩 세션을 위한 버전 번호를 증가시킵니다. 이렇게 하면 오래된 로딩 결과가
+        # 최신 폴더에 적용되는 것을 방지할 수 있습니다.
+        self.thumb_load_version += 1
+        load_version = self.thumb_load_version
+
+        # 썸네일 리스트를 초기화하고 현재 썸네일 크기와 그리드 크기를 재설정합니다.
         self.list_widget.clear()
-        # 현재 리스트 위젯의 썸네일 크기에 맞춰 아이콘 크기와 그리드 크기를 재설정합니다.
         thumb_size = self.list_widget._thumb_size
         pad_w = self.list_widget._grid_padding_w
         pad_h = self.list_widget._grid_padding_h
         self.list_widget.setIconSize(QSize(thumb_size, thumb_size))
         self.list_widget.setGridSize(QSize(thumb_size + pad_w, thumb_size + pad_h))
 
-        all_files = []
-        for entry in sorted(folder.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in SUPPORTED_EXT:
-                all_files.append(str(entry))
+        # 지원되는 이미지 파일 목록을 가져옵니다. 이름순으로 정렬하여 일관된 순서를 유지합니다.
+        all_files: list[str] = []
+        try:
+            for entry in sorted(folder.iterdir()):
+                if entry.is_file() and entry.suffix.lower() in SUPPORTED_EXT:
+                    all_files.append(str(entry))
+        except Exception:
+            pass
 
         if not all_files:
             QMessageBox.information(self, "Info", "지원하는 이미지 파일이 없습니다.")
             return
 
+        # 각 항목에 대한 리스트 아이템과 플레이스홀더 위젯을 추가합니다.
         for path_str in all_files:
             p = Path(path_str)
-            # QListWidgetItem을 생성하고 파일 경로를 저장합니다.
             item = QListWidgetItem()
             item.setData(Qt.UserRole, path_str)
-            # 파일명을 툴팁으로 설정하여 필요 시 전체 이름을 확인할 수 있습니다.
             item.setToolTip(p.name)
-            # 커스텀 썸네일 위젯을 생성하여 이미지와 파일명을 표시합니다.
-            thumb_widget = ThumbnailWidget(p.name, self.list_widget._thumb_size)
-            # 투명한 플레이스홀더를 설정하여 초기 셀 크기가 유지되도록 합니다.
-            placeholder = QPixmap(self.list_widget._thumb_size, self.list_widget._thumb_size)
+            thumb_widget = ThumbnailWidget(p.name, thumb_size)
+            # 초기에는 빈 썸네일을 설정하여 그리드 크기를 유지합니다.
+            placeholder = QPixmap(thumb_size, thumb_size)
             placeholder.fill(Qt.transparent)
             thumb_widget.set_pixmap(placeholder)
             self.list_widget.addItem(item)
-            # 아이템에 위젯을 배치합니다.
             self.list_widget.setItemWidget(item, thumb_widget)
-            # 각 항목의 추천 크기를 설정하여 커스텀 위젯이 올바르게 표시되도록 합니다.
             item.setSizeHint(QSize(thumb_size + pad_w, thumb_size + pad_h))
 
-        # QListWidgetItem의 정렬을 수행하지 않습니다. 파일 목록은 이미 사전 정렬되어 있으며,
-        # 항목을 정렬하면 인덱스와 파일 매핑이 변경되어 썸네일이 올바르게 표시되지 않을 수 있습니다.
+        # 비동기적으로 썸네일을 로딩합니다. 각 작업은 스레드 풀에서 실행되며, 완료 시
+        # 메인 스레드에서 업데이트를 수행합니다.
+        current_folder = self.current_folder
 
-        # 스레드를 사용하지 않고 즉시 썸네일을 생성하여 목록에 표시합니다.
-        # 많은 파일을 처리할 경우 UI의 응답성을 위해 이벤트 루프를 간헐적으로 처리합니다.
-        for idx, path_str in enumerate(all_files):
-            # 로딩 중 사용자가 다른 폴더를 선택했을 경우 중단합니다.
-            if self.current_folder != folder:
-                break
-            path_obj = Path(path_str)
+        def load_qimage(path_str: str, size: int) -> QImage | None:
+            """
+            백그라운드 스레드에서 이미지 파일을 로딩하여 QImage로 변환합니다.
+            QPixmap은 GUI 스레드에서만 안전하게 생성될 수 있으므로 여기서 QImage만 생성합니다.
+            로딩에 실패하면 None을 반환합니다.
+            """
             try:
-                img = load_pil_image(path_obj, max_size=self.list_widget._thumb_size)
+                path_obj = Path(path_str)
+                img = load_pil_image(path_obj, max_size=size)
                 qimg = pil_to_qimage(img)
-                pixmap = QPixmap.fromImage(qimg)
-                if not pixmap.isNull():
-                    item = self.list_widget.item(idx)
-                    if item is not None:
-                        # 커스텀 위젯을 가져와 썸네일을 설정합니다.
-                        widget = self.list_widget.itemWidget(item)
-                        if isinstance(widget, ThumbnailWidget):
-                            widget.set_pixmap(pixmap)
+                return qimg
             except Exception:
-                pass
-            QApplication.processEvents()
+                return None
 
-        # 썸네일이 모두 설정되었으므로 리스트를 업데이트합니다.
+        # 콜백 함수: 로딩된 썸네일을 메인 스레드에서 적용합니다.
+        def on_loaded(path_str: str, qimage: QImage | None, version: int):
+            # 버전 또는 현재 폴더가 변경되었다면 무시합니다.
+            if self.thumb_load_version != version or self.current_folder != folder:
+                return
+            if qimage is None:
+                return
+            # 메인 스레드에서 처리되도록 시그널을 발생시킵니다.
+            self.thumbnail_loaded.emit(path_str, qimage)
+
+        # 스레드 풀에 로딩 작업을 제출합니다.
+        for path_str in all_files:
+            # 로딩 함수와 콜백을 캡처하여 비동기 실행합니다.
+            future = self.thumb_executor.submit(load_qimage, path_str, thumb_size)
+            future.add_done_callback(
+                lambda f, p=path_str, v=load_version: on_loaded(p, f.result(), v)
+            )
+
+        # 썸네일 추가 후 레이아웃을 갱신합니다.
         self.list_widget.updateGeometry()
         self.list_widget.repaint()
+
+    def _apply_thumbnail(self, path_str: str, qimage: QImage):
+        """
+        비동기 로딩된 이미지(QImage)를 받아 현재 표시 중인 리스트 항목에 썸네일을 적용합니다.
+        이 메서드는 항상 GUI 스레드에서 호출됩니다.
+        """
+        # 현재 폴더가 변경되었거나 버전이 맞지 않으면 무시
+        # (버전 체크는 로딩 함수에서 이미 수행되므로 여기서 추가 확인은 선택적입니다.)
+        if qimage is None:
+            return
+        pixmap = QPixmap.fromImage(qimage)
+        if pixmap.isNull():
+            return
+        count = self.list_widget.count()
+        for i in range(count):
+            item = self.list_widget.item(i)
+            if item is not None and item.data(Qt.UserRole) == path_str:
+                widget = self.list_widget.itemWidget(item)
+                if isinstance(widget, ThumbnailWidget):
+                    widget.set_pixmap(pixmap)
+                break
 
     def _stop_thumb_thread(self):
         # 워커와 스레드가 존재하면 안전하게 중지하고 리소스를 정리합니다.
@@ -1406,8 +1474,80 @@ class GridSelectorWindow(QMainWindow):
     # 종료 처리
     # --------------------------------------------------------
     def closeEvent(self, event):
+        # 이전 워커 스레드 정리
         self._stop_thumb_thread()
+        # 스레드 풀을 안전하게 종료합니다. 대기하지 않고 현재 실행 중인 작업을 취소합니다.
+        try:
+            self.thumb_executor.shutdown(wait=False, cancel_futures=True)  # Python 3.9+
+        except TypeError:
+            # Python 3.8에서는 cancel_futures 인자를 지원하지 않습니다.
+            self.thumb_executor.shutdown(wait=False)
         super().closeEvent(event)
+
+    # --------------------------------------------------------
+    # 듀얼 모드 토글
+    # --------------------------------------------------------
+    def toggle_dual_mode(self, checked: bool):
+        """
+        듀얼 모드 토글. 켜면 프리뷰 영역을 새로운 창으로 분리하고, 끄면 다시 합칩니다.
+        checked: True -> 듀얼 모드 활성화, False -> 비활성화
+        """
+        if checked:
+            # 이미 듀얼 모드이면 무시
+            if self.dual_mode_enabled:
+                return
+            # 프리뷰 스플리터를 오른쪽 패널에서 분리
+            if self.splitter_right is not None:
+                try:
+                    self.right_layout.removeWidget(self.splitter_right)
+                except Exception:
+                    pass
+                self.splitter_right.setParent(None)
+            # 새로운 창 생성
+            self.dual_window = QMainWindow(self)
+            self.dual_window.setWindowTitle("프리뷰")
+            self.dual_window.setCentralWidget(self.splitter_right)
+            # 적절한 초기 크기를 설정합니다
+            try:
+                size = self.splitter_right.size()
+                if size.width() > 0 and size.height() > 0:
+                    self.dual_window.resize(size)
+                else:
+                    self.dual_window.resize(600, 600)
+            except Exception:
+                self.dual_window.resize(600, 600)
+            self.dual_window.show()
+            # 왼쪽 그리드가 전체 너비를 차지하도록 스플리터 크기를 조정합니다.
+            if hasattr(self, 'splitter_main'):
+                total_width = self.width()
+                self.splitter_main.setSizes([total_width, 0])
+            # 버튼 텍스트 변경
+            self.btn_dual_mode.setText("단일 모드")
+            self.dual_mode_enabled = True
+        else:
+            # 이미 비활성화된 경우 무시
+            if not self.dual_mode_enabled:
+                return
+            # 프리뷰 영역을 듀얼 창에서 제거하고 다시 오른쪽 패널로 복원
+            if self.dual_window is not None:
+                try:
+                    self.dual_window.setCentralWidget(None)
+                    self.dual_window.close()
+                except Exception:
+                    pass
+                self.dual_window = None
+            if self.splitter_right is not None:
+                self.splitter_right.setParent(self.right_widget)
+                self.right_layout.addWidget(self.splitter_right)
+            # 스플리터 크기를 기본 비율로 복원
+            if hasattr(self, 'splitter_main'):
+                total_width = self.width()
+                left_width = int(total_width * 0.7)
+                right_width = total_width - left_width
+                self.splitter_main.setSizes([left_width, right_width])
+            # 버튼 텍스트 복원
+            self.btn_dual_mode.setText("듀얼 모드")
+            self.dual_mode_enabled = False
 
     # 이벤트 필터를 통해 리스트 위젯의 키 이벤트를 메인 윈도우로 전달합니다.
     def eventFilter(self, obj, event):
