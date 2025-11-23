@@ -10,10 +10,11 @@ import pillow_heif
 
 from PySide6.QtCore import (
     Qt, QSize, QThread, Signal, QObject, QEasingCurve, QPropertyAnimation, QRect, QPoint,
-    QMetaObject,
+    QMetaObject, QUrl
 )
 from PySide6.QtGui import (
-    QImage, QPixmap, QDrag, QPainter, QColor, QPen, QShortcut, QKeySequence
+    QImage, QPixmap, QDrag, QPainter, QColor, QPen, QShortcut, QKeySequence, QIcon,
+    QDesktopServices
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -341,17 +342,22 @@ class ImageListWidget(QListWidget):
     def mousePressEvent(self, event):
         # 왼쪽 버튼 클릭 시 현재 위치를 기록하여 나중에 드래그 거리 판정에 사용합니다.
         if event.button() == Qt.LeftButton:
-            try:
+            # Record the starting position for drag/selection. Use event.position() if
+            # available; otherwise compute from x/y coordinates to avoid the deprecated
+            # pos() method. This avoids DeprecationWarning on newer PySide versions.
+            if hasattr(event, 'position'):
                 pos = event.position().toPoint()
-            except AttributeError:
-                pos = event.pos()
+            else:
+                # Fall back to x() and y() rather than pos() to prevent deprecation
+                pos = QPoint(event.x(), event.y())
             self._drag_start_pos = pos
             self._rubber_start_pos = pos
         # 기존 로직: modifier 정보와 함께 클릭 시그널을 전달합니다.
-        try:
+        # Determine the position used for emitting the click-with-modifier signal.
+        if hasattr(event, 'position'):
             pos_for_mod = event.position().toPoint()
-        except AttributeError:
-            pos_for_mod = event.pos()
+        else:
+            pos_for_mod = QPoint(event.x(), event.y())
         item = self.itemAt(pos_for_mod)
         if item is not None:
             self.clicked_with_modifiers.emit(item, event.modifiers())
@@ -360,7 +366,8 @@ class ImageListWidget(QListWidget):
     def mouseMoveEvent(self, event):
         # 드래그 시작 위치가 기록되어 있고, 일정 거리 이상 이동한 경우 드래그를 시작합니다.
         # 현재 마우스 위치
-        current_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+        # Use position() if available; otherwise derive from x/y to avoid deprecated pos()
+        current_pos = event.position().toPoint() if hasattr(event, 'position') else QPoint(event.x(), event.y())
         # 드래그 이동 처리: 선택된 항목 위에서 일정 거리 이상 이동하면 드래그를 시작합니다.
         if self._drag_start_pos is not None:
             if (current_pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
@@ -600,20 +607,22 @@ class PannableScrollArea(QScrollArea):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._dragging = True
-            # Use event.position() if available; fall back to event.pos() for older versions
-            try:
+            # Record the last mouse position for panning. Use event.position() when
+            # available; otherwise derive from x/y to avoid deprecated pos().
+            if hasattr(event, 'position'):
                 self._last_pos = event.position().toPoint()
-            except AttributeError:
-                self._last_pos = event.pos()
+            else:
+                self._last_pos = QPoint(event.x(), event.y())
             self.setCursor(Qt.ClosedHandCursor)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging and self._last_pos is not None:
-            try:
+            # Use event.position() when available; otherwise compute from x/y
+            if hasattr(event, 'position'):
                 current_pos = event.position().toPoint()
-            except AttributeError:
-                current_pos = event.pos()
+            else:
+                current_pos = QPoint(event.x(), event.y())
             delta = current_pos - self._last_pos
             hbar = self.horizontalScrollBar()
             vbar = self.verticalScrollBar()
@@ -657,6 +666,14 @@ class GridSelectorWindow(QMainWindow):
         # 기본 제목 및 크기 설정
         # 프로그램 이름을 사용자 요구에 따라 변경합니다.
         self.setWindowTitle("시퀀셜 셀럭터")
+        # 애플리케이션 아이콘 설정: exe로 빌드했을 때에도 아이콘이 적용되도록
+        # 현재 스크립트와 같은 폴더에 'sqs.ico' 파일이 있는 경우 사용합니다.
+        try:
+            icon_path = Path(__file__).resolve().parent / 'sqs.ico'
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+        except Exception:
+            pass
         # 초기 창 크기를 설정합니다. 너무 큰 값 대신 적절한 비율을 사용하여 OS마다 알맞은 크기를 보장합니다.
         self.resize(1400, 850)
 
@@ -690,14 +707,68 @@ class GridSelectorWindow(QMainWindow):
         # Undo stack for file moves. Each entry is a list of (src, dst) tuples recorded when moving files.
         self.undo_stack: list[list[tuple[Path, Path]]] = []
 
+        # Redo stack for undone moves. Ctrl+Y will reapply the last undone operation.
+        self.redo_stack: list[list[tuple[Path, Path]]] = []
+
         self._scroll_sync_guard = False
 
+        # Initialize language and translations before setting up UI. This ensures
+        # that update_language() has access to self.language and self.translations
+        # when called within _setup_ui().
+        self.language: str = 'ko'
+        self.translations = {
+            'ko': {
+                'title': '시퀀셜 셀럭터',
+                'select_folder': 'Image Folder',  # Use English term as per user preference
+                'target1': 'Target1',
+                'target2': 'Target2',
+                'zoom_link': '독립 줌 모드',
+                'zoom_link_on': '공통 줌 모드',
+                'help': '도움말',
+                'dual_mode': '듀얼 모드',
+                'single_mode': '단일 모드',
+                'donate': '후원하기',
+                'language': 'English',
+                'slot1_prompt': '썸네일 클릭 → Slot1 프리뷰 (위)',
+                'slot2_prompt': 'Ctrl+클릭 → Slot2 프리뷰 (아래)',
+                'empty': 'Empty'
+            },
+            'en': {
+                'title': 'Sequential Selector',
+                'select_folder': 'Image Folder',
+                'target1': 'Target1',
+                'target2': 'Target2',
+                'zoom_link': 'Independent Zoom',
+                'zoom_link_on': 'Linked Zoom',
+                'help': 'Help',
+                'dual_mode': 'Dual Mode',
+                'single_mode': 'Single Mode',
+                'donate': 'Donate',
+                'language': '한국어',
+                'slot1_prompt': 'Thumbnail click → Slot1 preview (upper)',
+                'slot2_prompt': 'Ctrl+Click → Slot2 preview (lower)',
+                'empty': 'Empty'
+            }
+        }
+
+        # Define dual mode state before UI setup. This ensures update_language()
+        # can reference self.dual_mode_enabled safely during initial UI construction.
+        self.dual_mode_enabled: bool = False
+        self.dual_window: QMainWindow | None = None
+
+        # Set up the user interface. update_language() will be called within
+        # _setup_ui(), and since self.language and dual_mode_enabled are now defined,
+        # it will work correctly.
         self._setup_ui()
         self._setup_scroll_sync()
 
         # Ctrl+Z to undo last move
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo_last_move)
+
+        # Ctrl+Y to redo last undone move
+        self.redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.redo_shortcut.activated.connect(self.redo_last_move)
 
         # Ctrl+D로 듀얼 모드를 토글할 수 있도록 단축키를 등록합니다.
         self.dual_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
@@ -727,15 +798,14 @@ class GridSelectorWindow(QMainWindow):
         # 스레드풀에서 로딩된 썸네일을 UI에 적용하기 위한 시그널 연결
         self.thumbnail_loaded.connect(self._apply_thumbnail)
 
-        # 듀얼 모드 상태
-        self.dual_mode_enabled: bool = False
-        self.dual_window: QMainWindow | None = None
+        # 듀얼 모드 상태는 __init__ 초기에 정의되므로 여기서는 다시 정의하지 않음
 
         # Connect the thumbnail size changed signal from the list widget to
         # reload thumbnails at a higher resolution when the user zooms the grid.
         # The slot on_thumb_size_changed will handle reloading while
         # preserving the current selection.
         self.list_widget.thumbSizeChanged.connect(self.on_thumb_size_changed)
+
 
         # --- Thumbnail reload throttling ---
         # To avoid reloading thumbnails on every incremental zoom step (which can
@@ -916,6 +986,20 @@ class GridSelectorWindow(QMainWindow):
         self.btn_target2.setFixedHeight(32)
         top_btn_layout.addWidget(self.btn_target2)
 
+        # 언어 토글 버튼: UI와 도움말 언어를 한국어와 영어로 전환합니다.
+        self.btn_language = QPushButton()
+        self.btn_language.setFixedHeight(32)
+        self.btn_language.clicked.connect(self.toggle_language)
+        top_btn_layout.addWidget(self.btn_language)
+
+        # 후원하기 버튼: BuyMeACoffee 링크로 연결됩니다. 작은 크기로 설정합니다.
+        self.btn_donate = QPushButton()
+        self.btn_donate.setFixedHeight(32)
+        # 후원하기 버튼은 폭을 줄여 다른 버튼보다 작게 만듭니다.
+        self.btn_donate.setFixedWidth(90)
+        self.btn_donate.clicked.connect(self.open_donate_link)
+        top_btn_layout.addWidget(self.btn_donate)
+
         # 타겟 폴더 경로 라벨을 제거하여 상단 버튼만 배치합니다.
         # 선택된 폴더 이름은 해당 버튼의 텍스트로 표시됩니다.
 
@@ -1086,6 +1170,10 @@ class GridSelectorWindow(QMainWindow):
         self.btn_dual_mode.toggled.connect(self.toggle_dual_mode)
         bottom_layout.addWidget(self.btn_dual_mode)
 
+        # After UI components are created, apply the initial language setting.
+        # This ensures that buttons like language toggle and donate are labeled correctly.
+        self.update_language()
+
     # --------------------------------------------------------
     # 스크롤 동기화
     # --------------------------------------------------------
@@ -1136,10 +1224,8 @@ class GridSelectorWindow(QMainWindow):
     def on_toggle_zoom_link(self, checked: bool):
         if checked:
             self.zoom_linked = False
-            self.btn_toggle_zoom_link.setText("공통 줌 모드")
         else:
             self.zoom_linked = True
-            self.btn_toggle_zoom_link.setText("독립 줌 모드")
             value = self.slider_zoom_1.value()
             self.slider_zoom_2.blockSignals(True)
             self.slider_zoom_2.setValue(value)
@@ -1147,6 +1233,8 @@ class GridSelectorWindow(QMainWindow):
             self.zoom_factors[0] = self.zoom_factors[1] = value / 100.0
             self.apply_zoom(0)
             self.apply_zoom(1)
+        # Update button text according to language
+        self.update_language()
 
     # --------------------------------------------------------
     # 도움말: 프로그램 사용 설명서
@@ -1158,48 +1246,96 @@ class GridSelectorWindow(QMainWindow):
         창은 사용자가 드래그하여 크기를 조절할 수 있으며, 텍스트 내용을 선택하거나
         복사할 수 있습니다.
         """
-        # 도움말 텍스트 구성
-        text = (
-            "※ 프로그램 사용 안내\n\n"
-            "■ 폴더 설정\n"
-            "- Image Folder 버튼으로 원본 이미지가 있는 폴더를 선택합니다.\n"
-            "- Target1, Target2 버튼으로 분류 대상 폴더를 설정합니다.\n\n"
-            "■ 이미지 선택 및 이동\n"
-            "- 클릭: 선택한 사진을 Slot1 프리뷰에 표시합니다.\n"
-            "- Ctrl + 클릭: 선택한 사진을 Slot2 프리뷰에 표시합니다.\n"
-            "- Shift + 클릭: 마지막 선택과 현재 클릭한 항목 사이의 모든 항목을 선택합니다.\n"
-            "- Ctrl + Shift + 클릭: 기존 선택에 연속 범위를 추가합니다.\n"
-            "- 드래그 박스: 마우스로 영역을 끌어 여러 장을 선택합니다.\n"
-            "- 1 키를 누른 채 클릭: 선택된 사진을 Target1 폴더로 이동합니다.\n"
-            "- 2 키를 누른 채 클릭: 선택된 사진을 Target2 폴더로 이동합니다.\n"
-            "- 1 또는 2 키를 눌렀다 놓으면: 다음 클릭에서 해당 폴더로 이동이 예약됩니다.\n"
-            "- 더블클릭: 해당 사진을 즉시 Target1 폴더로 이동합니다.\n"
-            "- 드래그 선택 후 1 또는 2 키: 선택된 모든 사진을 한 번에 Target1/Target2로 이동합니다.\n\n"
-            "■ 프리뷰 창\n"
-            "- Slot1과 Slot2의 두 프리뷰 영역이 있습니다.\n"
-            "- 마우스 드래그: 이미지 패닝(이동)\n"
-            "- 마우스 휠: 줌 인/아웃 (Ctrl 키 없이 사용)\n"
-            "- 줌 슬라이더: 확대/축소 배율을 조절합니다.\n"
-            "- 독립 줌 모드 버튼을 통해 두 프리뷰의 줌을 연동하거나 각각 조절할 수 있습니다.\n"
-            "- 프리뷰 창에서 줌과 스크롤 위치는 새 이미지를 선택해도 유지됩니다.\n\n"
-            "■ 격자(썸네일) 보기\n"
-            "- Ctrl + 마우스 휠: 썸네일 크기를 확대/축소합니다. 최대 1600px까지 확대 가능합니다.\n"
-            "  확대 시에는 자동으로 더 큰 해상도의 썸네일을 불러와 품질을 유지합니다.\n"
-            "- 썸네일 아래에는 파일명이 표시됩니다.\n"
-            "- Shift 키로 연속 선택, Ctrl 키로 개별 선택을 추가할 수 있습니다.\n\n"
-            "■ 키보드 단축 기능\n"
-            "- Ctrl + Z: 마지막 이동 작업을 취소합니다.\n"
-            "- 방향키: 격자에서 선택된 항목을 이동합니다.\n"
-            "- Enter: 현재 선택된 항목을 클릭한 것처럼 프리뷰에 표시합니다.\n"
-            "- 1 또는 2 키 + Enter: 키를 누른 채 Enter를 누르면 해당 타겟 폴더로 이동합니다.\n\n"
-            "■ 파일 이동\n"
-            "- 선택된 사진을 Target1/Target2 라벨로 드래그&드롭하여 이동할 수 있습니다.\n"
-            "- Target1/Target2를 지정하지 않으면 이동할 수 없습니다.\n\n"
-            "■ 기타 기능\n"
-            "- Clear Slot 버튼으로 각 프리뷰를 비울 수 있습니다.\n"
-            "- 듀얼 모드 버튼을 사용하여 격자와 프리뷰를 별도 창으로 분리하거나 다시 합칠 수 있습니다.\n"
-            "- 도움말 버튼을 통해 이 안내를 언제든 확인할 수 있습니다.\n"
-        )
+        # 도움말 텍스트를 언어에 따라 선택합니다.
+        if self.language == 'en':
+            text = (
+                "※ Program Usage Guide\n\n"
+                "■ Folder setup\n"
+                "- Use the Image Folder button to select the folder containing your original images.\n"
+                "- Use the Target1 and Target2 buttons to choose destination folders for classification.\n\n"
+                "■ Image selection and movement\n"
+                "- Click: show the selected photo in the Slot1 preview.\n"
+                "- Ctrl + click: show the selected photo in the Slot2 preview.\n"
+                "- Shift + click: select all items between the last clicked and the current item.\n"
+                "- Ctrl + Shift + click: add a contiguous range to your current selection.\n"
+                "- Drag box: draw a rectangle to select multiple photos at once.\n"
+                "- Hold the 1 key and click: move the clicked photo to the Target1 folder.\n"
+                "- Hold the 2 key and click: move the clicked photo to the Target2 folder.\n"
+                "- Press 1 or 2 and release: the next click will move a photo to that target.\n"
+                "- Double-click: immediately move that photo to the Target1 folder.\n"
+                "- Select multiple photos and press 1 or 2: move all selected photos to the respective target.\n\n"
+                "■ Preview windows\n"
+                "- Two preview slots are available: Slot1 (top) and Slot2 (bottom).\n"
+                "- Drag with the mouse to pan the image.\n"
+                "- Use the mouse wheel to zoom in/out (no modifier needed).\n"
+                "- Use the zoom slider to adjust the zoom factor.\n"
+                "- Independent Zoom Mode toggles whether zoom is linked between slots.\n"
+                "- Zoom and scroll positions are preserved when changing images.\n\n"
+                "■ Grid (thumbnail) view\n"
+                "- Ctrl + mouse wheel: resize thumbnails up to 1600px. Larger sizes automatically reload higher resolution thumbnails.\n"
+                "- Filenames are displayed below thumbnails.\n"
+                "- Use Shift for range selection and Ctrl to add to the selection.\n\n"
+                "■ Keyboard shortcuts\n"
+                "- Ctrl + Z: undo the last move.\n"
+                "- Ctrl + Y: redo the last undo.\n"
+                "- Arrow keys: move the selection in the grid.\n"
+                "- Enter: show the current selection in the preview.\n"
+                "- Hold 1 or 2 and press Enter: move the current selection to Target1 or Target2.\n\n"
+                "■ File movement\n"
+                "- Drag selected photos onto the Target1 or Target2 labels to move them.\n"
+                "- You must set target folders before moving.\n\n"
+                "■ Other features\n"
+                "- Clear Slot buttons clear each preview.\n"
+                "- Dual Mode splits the grid and previews into separate windows; toggle it again to merge.\n"
+                "- Help opens this guide.\n"
+                "- Language toggles between Korean and English.\n"
+                "- Donate opens the Buy Me a Coffee page to support development.\n"
+            )
+        else:
+            text = (
+                "※ 프로그램 사용 안내\n\n"
+                "■ 폴더 설정\n"
+                "- Image Folder 버튼으로 원본 이미지가 있는 폴더를 선택합니다.\n"
+                "- Target1, Target2 버튼으로 분류 대상 폴더를 설정합니다.\n\n"
+                "■ 이미지 선택 및 이동\n"
+                "- 클릭: 선택한 사진을 Slot1 프리뷰에 표시합니다.\n"
+                "- Ctrl + 클릭: 선택한 사진을 Slot2 프리뷰에 표시합니다.\n"
+                "- Shift + 클릭: 마지막 선택과 현재 클릭한 항목 사이의 모든 항목을 선택합니다.\n"
+                "- Ctrl + Shift + 클릭: 기존 선택에 연속 범위를 추가합니다.\n"
+                "- 드래그 박스: 마우스로 영역을 끌어 여러 장을 선택합니다.\n"
+                "- 1 키를 누른 채 클릭: 선택된 사진을 Target1 폴더로 이동합니다.\n"
+                "- 2 키를 누른 채 클릭: 선택된 사진을 Target2 폴더로 이동합니다.\n"
+                "- 1 또는 2 키를 눌렀다 놓으면: 다음 클릭에서 해당 폴더로 이동이 예약됩니다.\n"
+                "- 더블클릭: 해당 사진을 즉시 Target1 폴더로 이동합니다.\n"
+                "- 드래그 선택 후 1 또는 2 키: 선택된 모든 사진을 한 번에 Target1/Target2로 이동합니다.\n\n"
+                "■ 프리뷰 창\n"
+                "- Slot1과 Slot2의 두 프리뷰 영역이 있습니다.\n"
+                "- 마우스 드래그: 이미지 패닝(이동)\n"
+                "- 마우스 휠: 줌 인/아웃 (Ctrl 키 없이 사용)\n"
+                "- 줌 슬라이더: 확대/축소 배율을 조절합니다.\n"
+                "- 독립 줌 모드 버튼을 통해 두 프리뷰의 줌을 연동하거나 각각 조절할 수 있습니다.\n"
+                "- 프리뷰 창에서 줌과 스크롤 위치는 새 이미지를 선택해도 유지됩니다.\n\n"
+                "■ 격자(썸네일) 보기\n"
+                "- Ctrl + 마우스 휠: 썸네일 크기를 확대/축소합니다. 최대 1600px까지 확대 가능합니다.\n"
+                "  확대 시에는 자동으로 더 큰 해상도의 썸네일을 불러와 품질을 유지합니다.\n"
+                "- 썸네일 아래에는 파일명이 표시됩니다.\n"
+                "- Shift 키로 연속 선택, Ctrl 키로 개별 선택을 추가할 수 있습니다.\n\n"
+                "■ 키보드 단축 기능\n"
+                "- Ctrl + Z: 마지막 이동 작업을 취소합니다.\n"
+                "- Ctrl + Y: 이전에 취소한 이동을 다시 적용합니다.\n"
+                "- 방향키: 격자에서 선택된 항목을 이동합니다.\n"
+                "- Enter: 현재 선택된 항목을 클릭한 것처럼 프리뷰에 표시합니다.\n"
+                "- 1 또는 2 키 + Enter: 키를 누른 채 Enter를 누르면 해당 타겟 폴더로 이동합니다.\n\n"
+                "■ 파일 이동\n"
+                "- 선택된 사진을 Target1/Target2 라벨로 드래그&드롭하여 이동할 수 있습니다.\n"
+                "- Target1/Target2를 지정하지 않으면 이동할 수 없습니다.\n\n"
+                "■ 기타 기능\n"
+                "- Clear Slot 버튼으로 각 프리뷰를 비울 수 있습니다.\n"
+                "- 듀얼 모드 버튼을 사용하여 격자와 프리뷰를 별도 창으로 분리하거나 다시 합칠 수 있습니다.\n"
+                "- 도움말 버튼을 통해 이 안내를 언제든 확인할 수 있습니다.\n"
+                "- 언어 버튼을 눌러 한국어와 영어 간 전환할 수 있습니다.\n"
+                "- 후원하기 버튼을 눌러 개발자를 후원할 수 있습니다.\n"
+            )
         # 대화상자 생성
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextEdit
         dlg = QDialog(self)
@@ -1229,6 +1365,9 @@ class GridSelectorWindow(QMainWindow):
             QMessageBox.information(self, "Info", "되돌릴 이동이 없습니다.")
             return
         moves = self.undo_stack.pop()
+        # Save moves to redo stack so that Ctrl+Y can reapply them
+        # Copy the list to avoid modifications
+        self.redo_stack.append(list(moves))
         for dest_path, src_path in moves:
             try:
                 if not dest_path.exists():
@@ -1249,6 +1388,113 @@ class GridSelectorWindow(QMainWindow):
         # 현재 폴더가 설정되어 있으면 다시 로드
         if self.current_folder is not None:
             self.load_folder_grid(self.current_folder)
+
+    def redo_last_move(self):
+        """
+        Ctrl+Y를 사용하여 마지막으로 취소한 이동을 다시 적용합니다. redo_stack에 저장된
+        각 항목은 (dest_path, src_path) 튜플로 구성되어 있으며, src_path에서 dest_path로
+        다시 이동합니다. 이동 시 이름 충돌이 있으면 접미사를 붙여 처리합니다. 작업 후
+        현재 폴더를 다시 로드하여 화면을 갱신합니다.
+        """
+        if not self.redo_stack:
+            QMessageBox.information(self, "Info", "다시 적용할 이동이 없습니다.")
+            return
+        moves = self.redo_stack.pop()
+        # moves: list of (dest_path, src_path) originally recorded when the file was moved.
+        # After undo, files reside at src_path (or a _restored variant). We need to move
+        # them back to dest_path (or a new unique name in the destination folder).
+        action_moves: list[tuple[Path, Path]] = []
+        for dest_path, src_path in moves:
+            try:
+                # Determine the actual current source file: it could be at src_path or with
+                # a _restored suffix if a conflict occurred during undo. We pick the first
+                # existing file among possible restored names.
+                candidate = src_path
+                if not candidate.exists():
+                    # Try with _restored suffixes
+                    base = src_path.stem
+                    ext = src_path.suffix
+                    candidate = src_path.with_stem(f"{base}_restored")
+                    idx = 1
+                    while not candidate.exists() and idx < 10:
+                        candidate = src_path.with_stem(f"{base}_restored_{idx}")
+                        idx += 1
+                    if not candidate.exists():
+                        continue  # no file to move
+                src_file = candidate
+                # Compute destination path avoiding conflicts in target folder
+                folder = dest_path.parent
+                base = dest_path.stem
+                ext = dest_path.suffix
+                new_dest = folder / f"{base}{ext}"
+                i = 1
+                while new_dest.exists():
+                    new_dest = folder / f"{base}_{i}{ext}"
+                    i += 1
+                shutil.move(str(src_file), str(new_dest))
+                # record the move for undo stack
+                action_moves.append((new_dest, src_path))
+            except Exception as e:
+                print(f"Redo move failed for {src_path} -> {dest_path}: {e}")
+        # If any moves occurred, push to undo stack for possible undo again.
+        if action_moves:
+            self.undo_stack.append(action_moves)
+        # After redoing, reload folder
+        if self.current_folder is not None:
+            self.load_folder_grid(self.current_folder)
+
+    def toggle_language(self):
+        """
+        Toggle between Korean ('ko') and English ('en') UI. When toggled, update
+        all UI element texts and the help content. The language button itself
+        displays the target language name.
+        """
+        self.language = 'en' if self.language == 'ko' else 'ko'
+        self.update_language()
+
+    def update_language(self):
+        """
+        Apply the current language to all UI elements. This method updates
+        button texts, labels, window title, preview prompts, zoom link button
+        text based on the current state, and donate/language buttons. It should
+        be called after the UI is constructed and whenever the language is
+        toggled.
+        """
+        lang = self.language
+        tr = self.translations.get(lang, {})
+        # Update window title
+        self.setWindowTitle(tr.get('title', ''))
+        # Update top buttons
+        self.btn_select_folder.setText(tr.get('select_folder', self.btn_select_folder.text()))
+        self.btn_target1.setText(tr.get('target1', self.btn_target1.text()))
+        self.btn_target2.setText(tr.get('target2', self.btn_target2.text()))
+        # Donate button text
+        self.btn_donate.setText(tr.get('donate', self.btn_donate.text()))
+        # Language button text should display the name of the other language
+        self.btn_language.setText(tr.get('language', self.btn_language.text()))
+        # Zoom link button text depends on whether linked or independent
+        if self.zoom_linked:
+            self.btn_toggle_zoom_link.setText(tr.get('zoom_link', self.btn_toggle_zoom_link.text()))
+        else:
+            self.btn_toggle_zoom_link.setText(tr.get('zoom_link_on', self.btn_toggle_zoom_link.text()))
+        # Dual mode toggle button text depends on state
+        if self.dual_mode_enabled:
+            self.btn_dual_mode.setText(tr.get('single_mode', self.btn_dual_mode.text()))
+        else:
+            self.btn_dual_mode.setText(tr.get('dual_mode', self.btn_dual_mode.text()))
+        # Help button text
+        self.btn_help.setText(tr.get('help', self.btn_help.text()))
+        # Update preview prompt labels if no image loaded
+        if self.preview_pixmaps[0] is None:
+            self.preview_label_1.setText(tr.get('slot1_prompt', self.preview_label_1.text()))
+        if self.preview_pixmaps[1] is None:
+            self.preview_label_2.setText(tr.get('slot2_prompt', self.preview_label_2.text()))
+        # Ensure drop labels remain in English as they describe actions; optionally you can localize them
+
+    def open_donate_link(self):
+        """Open the Buy Me a Coffee link in the default browser."""
+        url = QUrl("https://buymeacoffee.com/modang")
+        QDesktopServices.openUrl(url)
 
     # --------------------------------------------------------
     # 줌 스텝 (Ctrl+휠)
@@ -1623,7 +1869,9 @@ class GridSelectorWindow(QMainWindow):
 
         if path_str is None:
             label.setPixmap(QPixmap())
-            label.setText("Empty")
+            # Use language-specific empty prompt
+            empty_text = self.translations.get(self.language, {}).get('empty', 'Empty')
+            label.setText(empty_text)
             self.preview_pixmaps[idx] = None
             self.zoom_factors[idx] = 1.0
             # 초기화 시 스크롤 위치도 초기화합니다.
@@ -1762,15 +2010,13 @@ class GridSelectorWindow(QMainWindow):
             return
         new_size = self._pending_thumb_size
         self._pending_thumb_size = None
-        # Determine if reload is necessary: if the difference between
-        # last_loaded_thumb_size and new_size is small (e.g., less than
-        # 20% change), skip reloading as existing icons can be scaled
-        # smoothly. This threshold prevents frequent reloads for minor
-        # adjustments.
+        # Reload only when the user has zoomed in beyond the previously
+        # loaded thumbnail size. Scaling down thumbnails is inexpensive,
+        # so we avoid reloading in that case. This ensures high-resolution
+        # thumbnails are loaded when zooming in but prevents unnecessary
+        # reloads when zooming out or making minor size adjustments.
         if self.last_loaded_thumb_size:
-            ratio = new_size / float(self.last_loaded_thumb_size)
-            if 0.8 <= ratio <= 1.25:
-                # Too small change; skip reload
+            if new_size <= self.last_loaded_thumb_size:
                 return
         # Remember current selection paths to restore later
         selected_items = self.list_widget.selectedItems()
@@ -1875,9 +2121,11 @@ class GridSelectorWindow(QMainWindow):
             # 실제 파일을 이동한 후 리스트에서 항목을 페이드 아웃시키면서 제거합니다.
             self.animate_item_removal(item)
 
-        # 이동한 항목이 있는 경우 undo 스택에 기록합니다.
+        # 이동한 항목이 있는 경우 undo 스택에 기록합니다. 새 이동이 발생하면 redo 스택을 비웁니다.
         if action_moves:
             self.undo_stack.append(action_moves)
+            # New user action clears the redo history
+            self.redo_stack.clear()
 
     # --------------------------------------------------------
     # 항목 제거 애니메이션
@@ -2007,6 +2255,8 @@ class GridSelectorWindow(QMainWindow):
             # 버튼 텍스트 복원
             self.btn_dual_mode.setText("듀얼 모드")
             self.dual_mode_enabled = False
+        # Update language-dependent text
+        self.update_language()
 
     # 이벤트 필터를 통해 리스트 위젯의 키 이벤트를 메인 윈도우로 전달합니다.
     def eventFilter(self, obj, event):
