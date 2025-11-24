@@ -94,7 +94,7 @@ pyinstaller \
 
 1. Image Folder 버튼으로 원본 폴더 선택
 2. Target1 / Target2 폴더 지정
-3. 클릭으로 Slot1, `Ctrl + 클릭` 으로 Slot2에 표시
+3. 더블 클릭으로 Slot1, `Ctrl + 더블블클릭` 으로 Slot2에 표시
 4. `1` 또는 `2` 키, 또는 드래그 앤 드롭으로 파일 이동
 5. 잘못 이동한 경우 `Ctrl + Z` 로 복구
 
@@ -207,7 +207,7 @@ The generated application will be in `dist/Sequential Selector.app`.
 
 1. Choose source folder (Image Folder)
 2. Set Target1 / Target2 folders
-3. Click → Slot1, Ctrl+Click → Slot2
+3. Double Click → Slot1, Ctrl+ Double Click → Slot2
 4. Move files using keys (`1`, `2`) or drag & drop
 5. Undo mistakes with `Ctrl + Z`
 
