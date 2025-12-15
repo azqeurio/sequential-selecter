@@ -1,4 +1,4 @@
-PySide6>=6.5
-Pillow>=9.0
-pillow-heif>=0.9
-rawpy>=0.17
+PySide6
+Pillow
+rawpy
+pillow-heif

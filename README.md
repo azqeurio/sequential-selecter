@@ -77,13 +77,13 @@ python3 -m pip install pyinstaller
 
 #### (2) .app 생성
 
-`sqs.py` 가 있는 디렉터리에서 실행합니다:
+`run.py` 가 있는 디렉터리에서 실행합니다:
 
 ```bash
 pyinstaller \
   --name "Sequential Selector" \
   --windowed \
-  sqs.py
+  run.py
 ```
 
 빌드 후 `dist/Sequential Selector.app` 가 생성됩니다.
@@ -196,7 +196,7 @@ python3 -m pip install pyinstaller
 pyinstaller \
   --name "Sequential Selector" \
   --windowed \
-  sqs.py
+  run.py
 ```
 
 The generated application will be in `dist/Sequential Selector.app`.
@@ -217,5 +217,3 @@ The generated application will be in `dist/Sequential Selector.app`.
 
 This project is licensed under the MIT License.
 See the `LICENSE` file for details.
-
-
