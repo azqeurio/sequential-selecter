@@ -2,3 +2,4 @@ PySide6
 Pillow
 rawpy
 pillow-heif
+pyinstaller
