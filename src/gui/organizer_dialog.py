@@ -1,5 +1,5 @@
 from pathlib import Path
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSettings
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QFileDialog, QComboBox, QCheckBox, QGroupBox, QProgressBar,
@@ -83,6 +83,7 @@ class OrganizerWidget(QWidget):
         self.ext_log: QTextEdit | None = None
         self.ext_progress: QProgressBar | None = None
 
+        self._load_settings() # Load before UI setup
         self._setup_ui()
         # Style sheet will be inherited or set by parent, but we can enforce dark style for components
         # self.setStyleSheet(DARK_STYLE) 
@@ -98,6 +99,69 @@ class OrganizerWidget(QWidget):
 
     def _t(self, key):
         return self.tr.get(key, key)
+
+    def _load_settings(self):
+        settings = QSettings("SSC", "Organizer")
+        
+        # Load Structure
+        # We store as list of dicts: [{"key": "date", "checked": True}, ...]
+        # Simple string list is easier if order is just keys, but we need check state.
+        # Let's use QSettings arrays or just a JSON string if simple.
+        # Actually, QSettings supports lists.
+        # Let's use a simple format: "key:1" or "key:0" string list.
+        
+        saved_structure = settings.value("structure", [])
+        
+        # Default if empty (First Run)
+        if not saved_structure:
+            # Requested Defaults: Camera, Year, Month, Date, Kind (Checked), Lens (Unchecked)
+            saved_structure = [
+                "camera:1",
+                "year:1",
+                "month:1",
+                "date:1",
+                "kind:1",
+                "lens:0"
+            ]
+        
+        # Parse
+        parsed_data = []
+        seen_keys = set()
+        for item in saved_structure:
+            if ":" in item:
+                key, state = item.split(":", 1)
+                parsed_data.append((key, state == "1"))
+                seen_keys.add(key)
+        
+        # Add any missing keys (future proofing)
+        all_keys = {
+            "date": "날짜 (YYYY-MM-DD)",
+            "camera": "카메라 모델",
+            "kind": "파일 종류 (RAW/JPG)",
+            "year": "연도 (YYYY)",
+            "month": "월 (YYYY-MM)",
+            "lens": "렌즈 모델"
+        }
+        
+        for key in all_keys:
+            if key not in seen_keys:
+                parsed_data.append((key, False))
+        
+        # Store for _setup_ui to use
+        self._initial_structure = parsed_data
+
+    def _save_settings(self):
+        settings = QSettings("SSC", "Organizer")
+        
+        # Build list
+        data = []
+        for i in range(self.list_structure.count()):
+            item = self.list_structure.item(i)
+            key = item.data(Qt.UserRole)
+            checked = "1" if item.checkState() == Qt.Checked else "0"
+            data.append(f"{key}:{checked}")
+            
+        settings.setValue("structure", data)
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -165,30 +229,85 @@ class OrganizerWidget(QWidget):
         # Expansion Fix: Use Minimum Height and remove fixed limit
         self.list_structure.setMinimumHeight(400) 
         
-        # Default tokens (Translated)
-        tokens = [
-            ("날짜 (YYYY-MM-DD)", "date", True),
-            ("카메라 모델", "camera", True),
-            ("파일 종류 (RAW/JPG)", "kind", True),
-            ("연도 (YYYY)", "year", False),
-            ("월 (YYYY-MM)", "month", False),
-            ("렌즈 모델", "lens", False),
-        ]
-        
-        for label, key, checked in tokens:
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, key)
-            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            self.list_structure.addItem(item)
+        # Use loaded structure
+        # Map keys back to labels
+        key_label_map = {
+            "date": "날짜 (YYYY-MM-DD)",
+            "camera": "카메라 모델",
+            "kind": "파일 종류 (RAW/JPG)",
+            "year": "연도 (YYYY)",
+            "month": "월 (YYYY-MM)",
+            "lens": "렌즈 모델"
+        }
+
+        # Use self._initial_structure populated in _load_settings
+        if hasattr(self, '_initial_structure'):
+             for key, checked in self._initial_structure:
+                 label = key_label_map.get(key, key)
+                 item = QListWidgetItem(label)
+                 item.setData(Qt.UserRole, key)
+                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                 self.list_structure.addItem(item)
+        else:
+             # Fallback (Should not happen if _load_settings called)
+             tokens = [
+                ("날짜 (YYYY-MM-DD)", "date", True),
+                ("카메라 모델", "camera", True),
+                ("파일 종류 (RAW/JPG)", "kind", True),
+                ("연도 (YYYY)", "year", False),
+                ("월 (YYYY-MM)", "month", False),
+                ("렌즈 모델", "lens", False),
+             ]
+             for label, key, checked in tokens:
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, key)
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                self.list_structure.addItem(item)
             
         opt_layout.addWidget(self.list_structure)
         
+        # Preview Label
+        self.lbl_preview = QLabel("예상 경로: ...")
+        self.lbl_preview.setStyleSheet("color: #4CAF50; font-weight: bold; margin-top: 5px;")
+        self.lbl_preview.setWordWrap(True)
+        opt_layout.addWidget(self.lbl_preview)
+
+        # Connect signals for live preview
+        # Connect signals for live preview AND persistence
+        self.list_structure.model().rowsMoved.connect(self._update_preview)
+        self.list_structure.model().rowsMoved.connect(self._save_settings) # Auto-save on reorder
+        
+        self.list_structure.itemChanged.connect(self._update_preview)
+        self.list_structure.itemChanged.connect(self._save_settings) # Auto-save on check/uncheck
+
         # Action
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("작업:"))
         self.bg_action = QButtonGroup(self)
         rb_copy = QRadioButton("복사 (Copy)")
         rb_move = QRadioButton("이동 (Move)")
+        
+        # Style for Green Indicator
+        rb_style = """
+            QRadioButton::indicator:checked {
+                background-color: #4CAF50;
+                border: 2px solid #4CAF50;
+                border-radius: 6px;
+                image: none;
+            }
+            QRadioButton::indicator:unchecked {
+                background-color: transparent;
+                border: 2px solid #888;
+                border-radius: 6px;
+            }
+            QRadioButton::indicator {
+                width: 12px;
+                height: 12px;
+            }
+        """
+        rb_copy.setStyleSheet(rb_style)
+        rb_move.setStyleSheet(rb_style)
+
         rb_copy.setChecked(True)
         self.bg_action.addButton(rb_copy, 1)
         self.bg_action.addButton(rb_move, 2)
@@ -208,7 +327,12 @@ class OrganizerWidget(QWidget):
         opt_grp.setLayout(opt_layout)
         layout.addWidget(opt_grp)
         
+
+        
         layout.addStretch()
+        
+        # Trigger initial update
+        self._update_preview()
 
     def log(self, msg):
         if self.ext_log:
@@ -239,6 +363,35 @@ class OrganizerWidget(QWidget):
         self.sorter_config["structure"] = structure
         self.sorter_config["action"] = "move" if self.bg_action.checkedId() == 2 else "copy"
         self.sorter_config["policy"] = self.combo_policy.currentData()
+
+    def _update_preview(self, *args):
+        # Generate dummy path based on current customized structure
+        parts = []
+        dest_root = self.lbl_dst.text()
+        if not dest_root or dest_root == "선택된 폴더 없음":
+            dest_root = "Target"
+        else:
+            dest_root = Path(dest_root).name
+        
+        parts.append(dest_root)
+
+        for i in range(self.list_structure.count()):
+            item = self.list_structure.item(i)
+            if item.checkState() == Qt.Checked:
+                key = item.data(Qt.UserRole)
+                if key == "date": val = "2023-12-25"
+                elif key == "year": val = "2023"
+                elif key == "month": val = "2023-12"
+                elif key == "camera": val = "OM-1"
+                elif key == "lens": val = "M.Zuiko_12-40mm_Pro"
+                elif key == "kind": val = "RAW"
+                elif key == "ext": val = "ORF"
+                else: val = "Unknown"
+                parts.append(val)
+        
+        parts.append("P123456.ORF")
+        preview_str = " / ".join(parts)
+        self.lbl_preview.setText(f"예상 경로: {preview_str}")
 
     def start_scan(self):
         src = self.lbl_src.text()
@@ -274,6 +427,7 @@ class OrganizerWidget(QWidget):
 
     def update_progress(self, status, current, total):
         if self.ext_progress:
+            self.ext_progress.setFormat("%v / %m (%p%)")
             self.ext_progress.setMaximum(total)
             self.ext_progress.setValue(current)
 

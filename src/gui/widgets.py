@@ -55,7 +55,24 @@ class ThumbnailWidget(QWidget):
         self.name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.name_label)
         
+        # Star Rating Label
+        self.rating_label = QLabel("")
+        self.rating_label.setAlignment(Qt.AlignCenter)
+        self.rating_label.setStyleSheet("color: #FFD700; font-size: 14pt; font-weight: bold;")
+        self.rating_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # self.rating_label.hide() # Hide until rated
+        layout.addWidget(self.rating_label)
+
         self.is_paired = False
+
+    def set_rating(self, rating: int):
+        if rating > 0:
+            stars = "★" * rating
+            self.rating_label.setText(stars)
+            self.rating_label.show()
+        else:
+            self.rating_label.setText("")
+            self.rating_label.hide()
 
     def set_paired(self, paired: bool):
         self.is_paired = paired
@@ -70,9 +87,39 @@ class ThumbnailWidget(QWidget):
 
     def set_pixmap(self, pixmap: QPixmap):
         if pixmap is not None and not pixmap.isNull():
+            self._current_pixmap = pixmap # Store original/current source if possible? 
+            # Storing full res pixmap for every item might be heavy if we had it?
+            # Actually set_pixmap receives the processed/loaded pixmap.
+            # If we store it, we can rescale from it without quality loss relative to "loaded" quality.
+            
+            # Use SmoothTransformation for high quality
+            scale_mode = Qt.SmoothTransformation
+            if self.thumb_size < 100: scale_mode = Qt.FastTransformation
+            
             self.image_label.setPixmap(pixmap.scaled(
                 self.thumb_size,
                 self.thumb_size,
+                Qt.KeepAspectRatio,
+                scale_mode
+            ))
+            
+    def update_thumb_size(self, size: int):
+        self.thumb_size = size
+        self.image_label.setFixedSize(size, size)
+        
+        # Rescale current content if available to prevent "Small Image in Big Box"
+        if self.image_label.pixmap() and not self.image_label.pixmap().isNull():
+            # We rescale the *currently displayed* pixmap. 
+            # Note: This might cause blurriness if upscaling significantly, 
+            # but it maintains layout until the high-res reload kicks in.
+            # Ideally we'd store the source pixmap, but we can just use the label's pixmap for now.
+            # Wait, label.pixmap() returns the scaled version.
+            # If we scale up from that, it gets blurry. That's fine for transition.
+            
+            current = self.image_label.pixmap()
+            self.image_label.setPixmap(current.scaled(
+                size,
+                size,
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             ))
@@ -279,7 +326,7 @@ class ImageListWidget(QListWidget):
 
             factor = 1.1 if delta_y > 0 else 0.9
             new_size = int(self._target_thumb_size * factor)
-            new_size = max(80, min(1600, new_size))
+            new_size = max(80, min(5000, new_size))
             
             self._target_thumb_size = new_size
             
@@ -342,8 +389,7 @@ class ImageListWidget(QListWidget):
             item = self.item(i)
             widget = self.itemWidget(item)
             if isinstance(widget, ThumbnailWidget):
-                widget.thumb_size = self._thumb_size
-                widget.image_label.setFixedSize(self._thumb_size, self._thumb_size)
+                widget.update_thumb_size(self._thumb_size)
             item.setSizeHint(QSize(grid_w, grid_h))
             
         self.thumbSizeChanged.emit(self._thumb_size)

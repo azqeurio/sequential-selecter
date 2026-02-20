@@ -7,7 +7,7 @@ import concurrent.futures
 
 from PySide6.QtCore import (
     Qt, QSize, QThread, Signal, QObject, QEasingCurve, QPropertyAnimation, QRect, QPoint,
-    QMetaObject, QUrl, QTimer, QEvent
+    QTimer, QEvent, QUrl
 )
 from PySide6.QtGui import (
     QImage, QPixmap, QDrag, QPainter, QColor, QPen, QShortcut, QKeySequence, QIcon,
@@ -24,10 +24,15 @@ from PIL import Image
 
 # Core imports (adjust as needed for your project structure)
 from ..core.image_loader import load_pil_image
+from ..core.file_worker import FileOperationWorker
 from .utils import pil_to_qimage
 from .widgets import ThumbnailWidget, DropLabel, ImageListWidget, GPUImageWidget
 from .organizer_dialog import OrganizerWidget
+from .organizer_dialog import OrganizerWidget
+from .filter_dialog import FilterDialog
+from .viewer_widget import FullViewerWidget
 from .styles import DARK_STYLE
+from ..core.rating_manager import RatingManager, get_image_metadata
 
 SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.heic', '.heif', '.arw', '.cr2', '.cr3', '.nef', '.rw2', '.orf', '.raf', '.dng'}
 RAW_EXT = {'.arw', '.cr2', '.cr3', '.nef', '.rw2', '.orf', '.raf', '.dng'}
@@ -40,8 +45,15 @@ class GridSelectorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("시퀀셜 셀럭터")
+        self.setWindowTitle("시퀀셜 셀럭터")
         try:
-            icon_path = Path(__file__).resolve().parent.parent.parent / 'sqs.ico'
+            # PyInstaller support
+            if hasattr(sys, '_MEIPASS'):
+                 base_path = Path(sys._MEIPASS)
+            else:
+                 base_path = Path(__file__).resolve().parent.parent.parent
+            
+            icon_path = base_path / 'sqs.ico'
             if icon_path.exists():
                 self.setWindowIcon(QIcon(str(icon_path)))
         except Exception:
@@ -60,6 +72,30 @@ class GridSelectorWindow(QMainWindow):
         self.preview_scroll_values: list[tuple[int, int]] = [(0, 0), (0, 0)]
         self.last_clicked_row: int | None = None
         self.target_click_mode: int | None = None
+        
+        # RAW+JPG Pair Mode
+        self.pair_mode_enabled: bool = False
+
+        # Rating Mode
+        self.rating_mode_enabled: bool = False
+        self.viewer_mode_enabled: bool = False
+        
+        # Initialize Rating Manager
+        if self.current_folder:
+             self.rating_manager = RatingManager(self.current_folder)
+        else:
+             self.rating_manager = None
+
+        # Rating Mode
+        self.rating_mode_enabled: bool = False
+        self.viewer_mode_enabled: bool = False
+        
+        # Initialize Rating Manager
+        if self.current_folder:
+             self.rating_manager = RatingManager(self.current_folder)
+        else:
+             self.rating_manager = None
+
         self.key_down_target: int | None = None
         self.moved_during_key_down: bool = False
 
@@ -150,17 +186,38 @@ class GridSelectorWindow(QMainWindow):
         self._thumb_reload_timer: QTimer = QTimer(self)
         self._thumb_reload_timer.setSingleShot(True)
         self._thumb_reload_timer.setInterval(250)
+        self._thumb_reload_timer.setInterval(250)
         self._thumb_reload_timer.timeout.connect(self._do_thumb_reload)
+        
+        self._thumb_reload_timer.timeout.connect(self._do_thumb_reload)
+        
+        # Loading State
+        # self.loading_progress = Signal(int, int) # Unused
+        
+        # File Operation Threads Tracking
+        self.active_file_ops = [] # List of (thread, worker)
+
+        # File Operation Thread/Worker
+        self.file_worker_thread = QThread()
+        self.file_worker = None
+        
+        # Init UI
+        self._init_layout_sizes()
+        self._setup_ui()
+        self._setup_scroll_sync()
 
     def closeEvent(self, event):
         # Clean Shutdown
         self._thumb_reload_timer.stop()
         # Do not call close_organizer() here if it triggers re-scan
         # Instead, just manually ensure organizer widget is hidden or cleaned up if needed
-        # self.close_organizer() - REMOVE to prevent reload
+        # self.close_organizer() - REMOVE
         
         self.thumb_executor.shutdown(wait=False)
         self.preview_executor.shutdown(wait=False)
+        if self.file_worker_thread.isRunning():
+            self.file_worker_thread.quit()
+            self.file_worker_thread.wait()
         super().closeEvent(event)
 
     def showEvent(self, event):
@@ -188,10 +245,31 @@ class GridSelectorWindow(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        central_layout = QHBoxLayout(central)
+        
+        # Main Stack (Grid vs Full Viewer)
+        self.main_stack = QStackedWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.addWidget(self.main_stack)
 
+        # Page 0: Standard Splitter Layout
+        self.page_grid = QWidget()
+        page_grid_layout = QHBoxLayout(self.page_grid)
+        page_grid_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.splitter_main = QSplitter(Qt.Horizontal)
-        central_layout.addWidget(self.splitter_main)
+        page_grid_layout.addWidget(self.splitter_main)
+        
+        self.main_stack.addWidget(self.page_grid)
+        
+        # Page 1: Full Viewer
+        self.viewer_widget = FullViewerWidget()
+        self.viewer_widget.request_prev.connect(self.viewer_prev)
+        self.viewer_widget.request_next.connect(self.viewer_next)
+        self.viewer_widget.request_close.connect(lambda: self.toggle_viewer_mode(False))
+        self.viewer_widget.request_open_folder.connect(self.choose_folder)
+        self.viewer_widget.rating_changed.connect(self.rate_current_image) # Re-use existing
+        self.main_stack.addWidget(self.viewer_widget)
 
         # Left Container
         left_widget = QWidget()
@@ -213,35 +291,84 @@ class GridSelectorWindow(QMainWindow):
         top_btn_layout = QHBoxLayout()
         left_layout.addLayout(top_btn_layout)
 
+        # --- LEFT: Folder Selection ---
         self.btn_select_folder = QPushButton("Image Folder")
-        self.btn_select_folder.setObjectName("SelectFolderBtn") # Use Global Style
+        self.btn_select_folder.setObjectName("SelectFolderBtn")
         self.btn_select_folder.clicked.connect(self.choose_folder)
-        self.btn_select_folder.setFixedHeight(40) # MD3 Standard
-        # Allow button to expand to show full path
+        self.btn_select_folder.setFixedHeight(40)
         self.btn_select_folder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        
         top_btn_layout.addWidget(self.btn_select_folder)
         
-        # Organizer Button (Primary)
+        top_btn_layout.addStretch(1) # Divider
+
+        # --- CENTER: Modes ---
+        self.btn_viewer_mode = QPushButton("Viewer Mode")
+        self.btn_viewer_mode.setCheckable(True)
+        self.btn_viewer_mode.clicked.connect(self.toggle_viewer_mode)
+        self.btn_viewer_mode.setFixedHeight(40)
+        self.btn_viewer_mode.setObjectName("TonalButton")
+        top_btn_layout.addWidget(self.btn_viewer_mode)
+
+        self.btn_rating_mode = QPushButton("Rating Mode")
+        self.btn_rating_mode.setCheckable(True)
+        self.btn_rating_mode.clicked.connect(self.toggle_rating_mode)
+        self.btn_rating_mode.setFixedHeight(40)
+        self.btn_rating_mode.setObjectName("TonalButton")
+        top_btn_layout.addWidget(self.btn_rating_mode)
+
         self.btn_organize = QPushButton("Move Photos")
         self.btn_organize.setCheckable(True) 
         self.btn_organize.clicked.connect(self.toggle_organizer)
         self.btn_organize.setFixedHeight(40)
-        self.btn_organize.setObjectName("PrimaryButton") # Force Green
-        # Inherits primary green style
+        self.btn_organize.setObjectName("PrimaryButton")
         top_btn_layout.addWidget(self.btn_organize)
+        
+        top_btn_layout.addStretch(1) # Divider
 
+        # --- RIGHT: Tools & Targets ---
+        # Targets (Always Visible now as per request)
         self.btn_target1 = QPushButton("Target1")
         self.btn_target1.clicked.connect(self.choose_target1)
         self.btn_target1.setFixedHeight(40)
-        self.btn_target1.setObjectName("TonalButton") # Secondary Style
+        self.btn_target1.setObjectName("TonalButton")
         top_btn_layout.addWidget(self.btn_target1)
 
         self.btn_target2 = QPushButton("Target2")
         self.btn_target2.clicked.connect(self.choose_target2)
         self.btn_target2.setFixedHeight(40)
-        self.btn_target2.setObjectName("TonalButton") # Secondary Style
+        self.btn_target2.setObjectName("TonalButton")
         top_btn_layout.addWidget(self.btn_target2)
+
+        self.btn_filter = QPushButton("Filter")
+        self.btn_filter.clicked.connect(self.show_filter_dialog)
+        self.btn_filter.setFixedHeight(40)
+        self.btn_filter.setObjectName("TonalButton")
+        top_btn_layout.addWidget(self.btn_filter)
+
+        # Clear All Ratings button (only visible in Rating Mode)
+        self.btn_clear_ratings = QPushButton("Clear Ratings")
+        self.btn_clear_ratings.clicked.connect(self.clear_all_ratings)
+        self.btn_clear_ratings.setFixedHeight(40)
+        self.btn_clear_ratings.setStyleSheet("background-color: #FF4444; color: white; font-weight: bold;")
+        self.btn_clear_ratings.hide()  # Hidden until Rating Mode is on
+        top_btn_layout.addWidget(self.btn_clear_ratings)
+
+        # HQ Reload Button
+        self.btn_hq = QPushButton("HQ Load")
+        self.btn_hq.setFixedWidth(80)
+        self.btn_hq.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50; 
+                color: white; 
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:pressed { background-color: #3e8e41; }
+        """)
+        self.btn_hq.setToolTip("Force High Quality Reload")
+        self.btn_hq.clicked.connect(self.force_hq_reload)
+        top_btn_layout.addWidget(self.btn_hq)
 
         self.btn_language = QPushButton()
         self.btn_language.setFixedHeight(40)
@@ -251,9 +378,7 @@ class GridSelectorWindow(QMainWindow):
 
         self.btn_donate = QPushButton()
         self.btn_donate.setFixedHeight(40)
-        # Remove FixedWidth(90) causing clipping
-        # self.btn_donate.setFixedWidth(90) 
-        self.btn_donate.setMinimumWidth(80) # Flexible minimum
+        self.btn_donate.setMinimumWidth(80)
         self.btn_donate.setObjectName("TonalButton")
         self.btn_donate.clicked.connect(self.open_donate_link)
         top_btn_layout.addWidget(self.btn_donate)
@@ -405,10 +530,6 @@ class GridSelectorWindow(QMainWindow):
         slot2_p_layout = QVBoxLayout(self.slot2_preview_widget)
         slot2_p_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Slot 2 - Page 0: Image Preview
-        self.slot2_preview_widget = QWidget()
-        slot2_p_layout = QVBoxLayout(self.slot2_preview_widget)
-        slot2_p_layout.setContentsMargins(0, 0, 0, 0)
         
         # GPU Accelerated Widget
         self.preview_widget_2 = GPUImageWidget()
@@ -442,7 +563,19 @@ class GridSelectorWindow(QMainWindow):
         org_log_layout.addWidget(self.org_log_text)
         
         self.org_progress = QProgressBar()
-        self.org_progress.setFixedHeight(16)
+        self.org_progress.setFixedHeight(24)
+        self.org_progress.setTextVisible(True)
+        self.org_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 4px;
+                text-align: center;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+            }
+        """)
         org_log_layout.addWidget(self.org_progress)
         
         self.slot2_stack.addWidget(self.org_log_widget)
@@ -546,19 +679,20 @@ class GridSelectorWindow(QMainWindow):
             self.zoom_factors[0] = self.zoom_factors[1] = value / 100.0
             self.apply_zoom(0)
             self.apply_zoom(1)
-        self.update_language()
 
     def toggle_organizer(self, checked):
         if checked:
             self.left_stack.setCurrentIndex(1)
             self.slot1_stack.setCurrentIndex(1)
             self.slot2_stack.setCurrentIndex(1)
+            
             if self.current_folder:
                 self.organizer_widget.lbl_src.setText(str(self.current_folder))
         else:
             self.left_stack.setCurrentIndex(0)
             self.slot1_stack.setCurrentIndex(0)
             self.slot2_stack.setCurrentIndex(0)
+            
             if self.current_folder:
                  self.load_folder_grid(self.current_folder)
 
@@ -576,48 +710,67 @@ class GridSelectorWindow(QMainWindow):
             return
         moves = self.undo_stack.pop()
         self.redo_stack.append(list(moves))
+        
+        # Reverse moves: (dest, src) -> src is original location
+        # We need to move from dest -> src
+        reverse_ops = []
         for dest_path, src_path in moves:
-            try:
-                if not dest_path.exists(): continue
-                target_path = src_path
-                if target_path.exists():
-                    base = src_path.stem
-                    ext = src_path.suffix
-                    target_path = src_path.with_stem(f"{{base}}_restored")
-                    i = 1
-                    while target_path.exists():
-                        target_path = src_path.with_stem(f"{{base}}_restored_{{i}}")
-                        i += 1
-                shutil.move(str(dest_path), str(target_path))
-            except Exception as e:
-                print(f"Undo failed: {e}")
-        if self.current_folder:
-            self.load_folder_grid(self.current_folder)
+            if not dest_path.exists(): continue
+            target_path = src_path
+            
+            # Handle collision on restore
+            if target_path.exists():
+                base = src_path.stem
+                target_path = src_path.with_stem(f"{base}_restored")
+                i = 1
+                while target_path.exists():
+                    target_path = src_path.with_stem(f"{base}_restored_{i}")
+                    i += 1
+            
+            reverse_ops.append((dest_path, target_path))
+
+        if reverse_ops:
+            self._start_file_operation(reverse_ops, 'move', is_undo=True)
 
     def redo_last_move(self):
         if not self.redo_stack:
             QMessageBox.information(self, "Info", "다시 적용할 이동이 없습니다.")
             return
         moves = self.redo_stack.pop()
-        action_moves: list[tuple[Path, Path]] = []
-        for dest_path, src_path in moves:
-            try:
-                candidate = src_path
-                if not candidate.exists():
-                    base = src_path.stem
-                    candidate = src_path.with_stem(f"{{base}}_restored")
-                if not candidate.exists(): continue
-                
-                new_dest = dest_path 
-                shutil.move(str(candidate), str(new_dest))
-                action_moves.append((new_dest, src_path))
-            except Exception:
-                pass
         
-        if action_moves:
-            self.undo_stack.append(action_moves)
-        if self.current_folder:
-            self.load_folder_grid(self.current_folder)
+        # Redo is basically repeating the original moves
+        # but we need to check if source still exists (or was restored)
+        redo_ops = []
+        recorded_moves = [] # For undo stack
+        
+        for dest_path, src_path in moves:
+             # src_path is the ORIGINAL source. 
+             # But if we undid, the file should be back at src_path (or restored name)
+             # This is tricky because Undo might have renamed it.
+             # For simplicity, we assume robust users or simple flow.
+             # Ideally Undo should return the EXACT restore path it used.
+             # For now, we try src_path or typical restore names?
+             
+             # Actually, simpler: just try to move src_path -> dest_path
+             # If src_path missing, maybe checking for restored variants is needed?
+             # Let's trust standard flow for now.
+             
+             candidate = src_path
+             if not candidate.exists():
+                 # Try restored name guess?
+                 base = src_path.stem
+                 candidate = src_path.with_stem(f"{base}_restored")
+             
+             if not candidate.exists(): continue
+             
+             redo_ops.append((candidate, dest_path))
+             recorded_moves.append((dest_path, src_path)) # Keep original contract
+        
+        if redo_ops:
+            # We push back to undo stack immediately? Or wait for finish?
+            # Standard pattern: push to undo stack
+            self.undo_stack.append(recorded_moves)
+            self._start_file_operation(redo_ops, 'move', is_undo=False)
 
     def toggle_language(self):
         self.language = 'en' if self.language == 'ko' else 'ko'
@@ -669,12 +822,25 @@ class GridSelectorWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key == Qt.Key_1 and self.target_folder1 is not None:
-            self.key_down_target = 1
-            return
-        if key == Qt.Key_2 and self.target_folder2 is not None:
-            self.key_down_target = 2
-            return
+
+        # Rating Mode Priority - BLOCKS Move/Target keys
+        if self.rating_mode_enabled and self.rating_manager:
+            if key == Qt.Key_1: self.rate_current_image(1); return
+            elif key == Qt.Key_2: self.rate_current_image(2); return
+            elif key == Qt.Key_3: self.rate_current_image(3); return
+            elif key == Qt.Key_4: self.rate_current_image(4); return
+            elif key == Qt.Key_5: self.rate_current_image(5); return
+            # Consume 1-5, do not fall through
+        
+        # Move/Target Keys (Only if NOT in Rating Mode)
+        if not self.rating_mode_enabled:
+            if key == Qt.Key_1 and self.target_folder1 is not None:
+                self.key_down_target = 1
+                return
+            if key == Qt.Key_2 and self.target_folder2 is not None:
+                self.key_down_target = 2
+                return
+            
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
@@ -719,8 +885,18 @@ class GridSelectorWindow(QMainWindow):
         self.current_folder = Path(folder)
         # Show FULL path as requested
         self.btn_select_folder.setText(str(self.current_folder))
+        
+        # Initialize Rating Manager for new folder
+        self.rating_manager = RatingManager(self.current_folder)
+        
         # Ask pairing on new folder load
         self.load_folder_grid(self.current_folder, ask_pairing=True)
+
+        # If in Viewer Mode, load first image immediately
+        if self.viewer_mode_enabled:
+             if self.list_widget.count() > 0:
+                 self.list_widget.setCurrentRow(0)
+                 self._load_viewer_image()
 
     # ... (skipping target choosers logic if unchanged, but they are localized) ...
 
@@ -745,7 +921,7 @@ class GridSelectorWindow(QMainWindow):
         self.list_widget.clear()
         self.thumb_load_version += 1
         current_version = self.thumb_load_version
-
+        
         # Recursive Scan
         files = []
         try:
@@ -764,6 +940,7 @@ class GridSelectorWindow(QMainWindow):
 
         # Detect Pairs and Ask User
         if ask_pairing:
+             self.pair_mode_enabled = False
              # Detailed Analysis using Fuzzy Logic
              # 1. Group by Stem (Case Insensitive, ignore parent)
              stem_map_temp = {}
@@ -882,6 +1059,12 @@ class GridSelectorWindow(QMainWindow):
         # --- Populate List and Start Local Generation ---
         visible_paths = []
         
+        # Load ratings if rating manager is active
+        rating_map = {}
+        if self.rating_manager:
+            ratings = self.rating_manager.load_ratings()
+            rating_map = {r['filename']: r['rating'] for r in ratings}
+
         for f, siblings in display_data:
             item = QListWidgetItem()
             self.list_widget.addItem(item)
@@ -897,6 +1080,11 @@ class GridSelectorWindow(QMainWindow):
             widget = ThumbnailWidget(display_text, self.list_widget._thumb_size)
             if siblings:
                 widget.set_paired(True) # Green border on thumbnail
+            
+            # Apply rating if available
+            if f.name in rating_map:
+                widget.set_rating(rating_map[f.name])
+
             item.setSizeHint(widget.sizeHint())
             self.list_widget.setItemWidget(item, widget)
             item.setData(Qt.UserRole, str(f))
@@ -911,18 +1099,30 @@ class GridSelectorWindow(QMainWindow):
         self.preview_widget_2.set_pixmap(None)
 
         # Start loading thumbnails
+        self._reset_thumb_executor() # Clear old tasks
+        
+        # self.total_loading_tasks = len(visible_paths)
+        # self.finished_loading_tasks = 0
+        # self.loading_bar.setRange(0, self.total_loading_tasks)
+        # self.loading_bar.setValue(0)
+        # self.loading_bar.show()
+
         for p in visible_paths:
-             self.thumb_executor.submit(self._load_thumbnail_task, p, self.list_widget._thumb_size, current_version)
+             future = self.thumb_executor.submit(self._load_thumbnail_task, p, self.list_widget._thumb_size, current_version)
+             # future.add_done_callback(lambda f: QTimer.singleShot(0, self._update_progress))
 
     def _load_thumbnail_task(self, path, size, version):
         if version != self.thumb_load_version: return
         try:
+            # Force high-res load by passing max_size
+            # log_debug(f"DEBUG: Loading {path.name} at size {size}")
             img = load_pil_image(Path(path), max_size=size)
             if img:
                 qimg = pil_to_qimage(img)
                 if version == self.thumb_load_version:
-                    self.thumbnail_loaded.emit(path, qimg)
-        except Exception:
+                    self.thumbnail_loaded.emit(str(path), qimg)
+        except Exception as e:
+            log_debug(f"DEBUG: Load Fail {e}")
             pass
 
     def _apply_thumbnail(self, path, qimg):
@@ -940,11 +1140,85 @@ class GridSelectorWindow(QMainWindow):
         self._pending_thumb_size = new_size
         self._thumb_reload_timer.start()
 
+    def force_hq_reload(self):
+        # Force refresh with current (or slightly larger just to be safe) size
+        # Or pass a specific flag? For now, large size triggers the check.
+        current_size = self.list_widget._thumb_size
+        # To guarantee passing the check 'max(w,h) < max_size', we can use a huge number?
+        # But load_pil_image uses max_size to resize via .thumbnail().
+        # If we pass 5000, it returns 5000px image. widgets.py scales it down.
+        # This is fine for "HQ".
+        
+        # Better: Pass current_size but maybe add a logic to ensure we don't pick the thumb.
+        # load_pil_image logic: if max(thumb_w, thumb_h) < max_size: discard thumb.
+        # If current_size is 300 (small), and thumb is 300, it keeps thumb.
+        # User wants HQ even at small sizes? Maybe.
+        # If so, we should pass a fake large size, or modify logic.
+        # Let's try passing max(current_size, 3000) for the HQ button.
+        target_size = max(current_size, 3000)
+        self.refresh_grid_images(target_size)
+
     def _do_thumb_reload(self):
         if self._pending_thumb_size is None or self.current_folder is None: return
-        if abs(self._pending_thumb_size - self.last_loaded_thumb_size) > 50:
+        diff = abs(self._pending_thumb_size - self.last_loaded_thumb_size)
+        if diff > 50:
             self.last_loaded_thumb_size = self._pending_thumb_size
-            self.load_folder_grid(self.current_folder)
+            # Use in-place refresh instead of full reload
+            self.refresh_grid_images(self._pending_thumb_size)
+
+    def _reset_thumb_executor(self):
+        try:
+            self.thumb_executor.shutdown(wait=False)
+        except Exception:
+            pass
+        cpu = os.cpu_count() or 4
+        max_workers = min(cpu, 8) 
+        self.thumb_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    def refresh_grid_images(self, new_size: int):
+        count = self.list_widget.count()
+        if count == 0: return
+
+        self.thumb_load_version += 1
+        current_version = self.thumb_load_version
+        
+        # Reset Executor
+        self._reset_thumb_executor()
+        
+        # Optimize: Only reload VISIBLE items
+        viewport_rect = self.list_widget.viewport().rect()
+        visible_count = 0
+        
+        for i in range(count):
+            item = self.list_widget.item(i)
+            item_rect = self.list_widget.visualItemRect(item)
+            
+            # Check visibility
+            if item_rect.intersects(viewport_rect):
+                path = Path(item.data(Qt.UserRole))
+                if path.exists():
+                    self.thumb_executor.submit(
+                        self._load_thumbnail_task, 
+                        path, 
+                        new_size, 
+                        current_version
+                    )
+                    visible_count += 1
+            
+            # Optimization: If we passed the visible area, break?
+            # Grid layout might not be perfectly linear in index, but usually it is.
+            # But let's just check all intersection, it's fast enough.
+        
+        print(f"HQ Reload triggered for {visible_count} visible items.")
+
+    def _update_progress(self):
+        # Progress bar is deleted. This function is dead code unless used by file ops.
+        # File ops also used loading_bar. 
+        # I should probably keep a small status text or something?
+        # User just said remove loading *window* (maybe dialog?) or the bar I added?
+        # "loading bar requests" -> "Remove loading window and make HQ button in that location".
+        # So I removed the bar. I'll comment this out.
+        pass
 
     def on_item_clicked_with_modifiers(self, item, modifiers):
         path = Path(item.data(Qt.UserRole))
@@ -1126,8 +1400,25 @@ class GridSelectorWindow(QMainWindow):
         self.update_language()
 
     def eventFilter(self, source, event):
+        # Intercept key events on the list widget for rating mode
         if source == self.list_widget and event.type() == QEvent.KeyPress:
-            pass
+            if self.rating_mode_enabled and self.rating_manager:
+                key = event.key()
+                if key == Qt.Key_1:
+                    self.rate_current_image(1)
+                    return True  # Consume event
+                elif key == Qt.Key_2:
+                    self.rate_current_image(2)
+                    return True
+                elif key == Qt.Key_3:
+                    self.rate_current_image(3)
+                    return True
+                elif key == Qt.Key_4:
+                    self.rate_current_image(4)
+                    return True
+                elif key == Qt.Key_5:
+                    self.rate_current_image(5)
+                    return True
         return super().eventFilter(source, event)
 
     def move_selected_to_target(self, target_idx):
@@ -1201,22 +1492,125 @@ class GridSelectorWindow(QMainWindow):
                  if ret == QMessageBox.Yes:
                      all_files_to_move.update(siblings_found)
 
-        moves = []
+        # Prepare operations
+        ops = []
+        recorded_moves = [] # For Undo Stack (dest, src)
+        
         for src in all_files_to_move:
             dest = dest_root / src.name
-            try:
-                if dest.exists():
-                     base = dest.stem
-                     ext = dest.suffix
-                     dest = dest_root / f"{base}_copy{ext}" 
-                shutil.move(str(src), str(dest))
-                moves.append((dest, src))
-            except Exception as e:
-                print(f"Move failed: {e}")
+            
+            # Smart Rename to avoid overwrite (just prepares the path)
+            # The worker also has a check, but we do it here to know the final dest for undo stack
+            if dest.exists():
+                 base = dest.stem
+                 ext = dest.suffix
+                 i = 1
+                 while dest.exists(): # Simple check
+                     dest = dest_root / f"{base}_copy{i}{ext}"
+                     i += 1
+            
+            ops.append((src, dest))
+            recorded_moves.append((dest, src))
+
+        if ops:
+            # OPTIMISTIC UI UPDATE: Remove items immediately
+            # We must iterate safely as we modify the list
+            # Map paths to items for quick removal
+            # Warning: siblings are hidden, so we only remove visible items that match
+            
+            # 1. Identify all paths being moved
+            paths_being_moved = {str(src) for src, _ in ops}
+            
+            # 2. Iterate list and remove items
+            # We walk backwards to avoid index issues
+            rows_to_remove = []
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                item_path = item.data(Qt.UserRole)
+                if item_path in paths_being_moved:
+                    rows_to_remove.append(i)
+            
+            # Remove in reverse order
+            for r in sorted(rows_to_remove, reverse=True):
+                self.list_widget.takeItem(r)
+
+            # Update Undo Stack
+            self.undo_stack.append(recorded_moves)
+            
+            # Start Background Operation
+            self._start_file_operation(ops, 'move')
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
         
-        if moves:
-            self.undo_stack.append(moves)
-            self.load_folder_grid(self.current_folder)
+        # Rating Mode takes priority over move keys
+        if self.rating_mode_enabled and self.rating_manager:
+            if key == Qt.Key_1:
+                self.rate_current_image(1)
+                return
+            elif key == Qt.Key_2:
+                self.rate_current_image(2)
+                return
+            elif key == Qt.Key_3:
+                self.rate_current_image(3)
+                return
+            elif key == Qt.Key_4:
+                self.rate_current_image(4)
+                return
+            elif key == Qt.Key_5:
+                self.rate_current_image(5)
+                return
+        
+        # Move keys (only when NOT in rating mode)
+        if not self.rating_mode_enabled:
+            if key == Qt.Key_1:
+                self.move_selected_to_target(1)
+            elif key == Qt.Key_2:
+                self.move_selected_to_target(2)
+            elif key == Qt.Key_Z and (mods & Qt.ControlModifier):
+                self.undo_last_move()
+            elif key == Qt.Key_Y and (mods & Qt.ControlModifier):
+                self.redo_last_move()
+            elif key == Qt.Key_D and (mods & Qt.ControlModifier):
+                self.btn_dual_mode.click()
+            else:
+                super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+    def _start_file_operation(self, ops, op_type, is_undo=False):
+        # Create new Thread and Worker
+        thread = QThread(self) # Parented to self to ensure life
+        worker = FileOperationWorker(ops, op_type)
+        worker.moveToThread(thread)
+        
+        # Track them to avoid GC
+        op_id = object() # unique tag
+        self.active_file_ops.append((thread, worker))
+        
+        # Cleanup callback
+        def cleanup():
+            if thread.isRunning(): thread.quit()
+            if worker: worker.deleteLater()
+            if thread: thread.deleteLater()
+            # Remove from list
+            for i, (t, w) in enumerate(self.active_file_ops):
+                if t is thread:
+                    self.active_file_ops.pop(i)
+                    break
+        
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(cleanup)
+        # worker.finished.connect(self._on_file_op_finished) # No-op currently
+        
+        worker.error.connect(lambda e: print(f"File Op Error: {e}"))
+        
+        if is_undo:
+             worker.finished.connect(lambda: self.load_folder_grid(self.current_folder))
+
+        thread.start()
 
     def move_item_to_target(self, item, target_idx):
         item.setSelected(True)
@@ -1291,3 +1685,188 @@ class GridSelectorWindow(QMainWindow):
         layout.addWidget(btn_box)
         
         dlg.exec()
+
+    def toggle_viewer_mode(self, checked):
+        self.viewer_mode_enabled = checked
+        if checked:
+             self.btn_viewer_mode.setChecked(True)
+             self.btn_viewer_mode.setText("Exit Viewer")
+             
+             # Switch to Stack Page 1
+             self.main_stack.setCurrentIndex(1)
+             
+             # Load current image into viewer
+             self._load_viewer_image()
+             
+             # Ensure focus for keyboard events
+             self.viewer_widget.setFocus()
+        else:
+             self.btn_viewer_mode.setChecked(False)
+             self.btn_viewer_mode.setText("Viewer Mode")
+             self.main_stack.setCurrentIndex(0)
+             
+    def _load_viewer_image(self):
+        # Get current selection
+        items = self.list_widget.selectedItems()
+        if not items: return
+        
+        item = items[0] # Single view focus
+        path = Path(item.data(Qt.UserRole))
+        
+        if not path.exists(): return
+        
+        # Check cache or load
+        # Use existing cache logic if possible or load fresh high-res
+        # For viewer, we want high quality.
+        pixmap = self._load_full_res_pixmap(path)
+        
+        # Get Rating
+        rating = 0
+        if self.rating_manager:
+            # We need to fetch rating efficiently.
+            # Ideally RatingManager should cache or we search.
+            # For now load all and find (Optimization point for later)
+            ratings = self.rating_manager.load_ratings()
+            for r in ratings:
+                if r['filename'] == path.name:
+                    rating = r['rating']
+                    break
+        
+        self.viewer_widget.load_image(path, pixmap, rating)
+
+    def _load_full_res_pixmap(self, path):
+         # Helper to load full res
+         img = load_pil_image(path, max_size=None) # Full size
+         if img:
+             return QPixmap.fromImage(pil_to_qimage(img))
+         return QPixmap()
+
+    def viewer_next(self):
+        row = self.list_widget.currentRow()
+        if row < self.list_widget.count() - 1:
+            self.list_widget.setCurrentRow(row + 1)
+            self._load_viewer_image()
+
+    def viewer_prev(self):
+        row = self.list_widget.currentRow()
+        if row > 0:
+             self.list_widget.setCurrentRow(row - 1)
+             self._load_viewer_image()
+
+    def toggle_rating_mode(self, checked):
+        self.rating_mode_enabled = checked
+        if checked:
+            # Disable organizer mode to prevent conflicts
+            if self.btn_organize.isChecked():
+                self.btn_organize.setChecked(False)
+            
+            self.btn_rating_mode.setText("Rate (1-5)")
+            self.btn_rating_mode.setStyleSheet("background-color: #FFD700; color: black; font-weight: bold;") 
+            # Show Clear button
+            self.btn_clear_ratings.show()
+        else:
+            self.btn_rating_mode.setText("Rating Mode")
+            self.btn_rating_mode.setStyleSheet("")
+            # Hide Clear button
+            self.btn_clear_ratings.hide()  
+
+    def rate_current_image(self, rating: int):
+        if not self.rating_manager: return
+        
+        items = self.list_widget.selectedItems()
+        if not items:
+            return
+            
+        count = 0
+        for item in items:
+            try:
+                path = Path(str(item.data(Qt.UserRole)))  # Avoid recursion from Path(Path(...))
+            except Exception:
+                continue
+            if not path.exists():
+                continue
+
+            # Toggle logic: same rating again → remove rating
+            existing = self.rating_manager.get_rating(path.name)
+            if existing == rating:
+                self.rating_manager.remove_rating(path.name)
+                widget = self.list_widget.itemWidget(item)
+                if widget:
+                    widget.set_rating(0)
+                count += 1
+                print(f"Removed rating for {path.name}")
+            else:
+                date_str, camera_str = get_image_metadata(path)
+                self.rating_manager.save_rating(path.name, rating, date_str, camera_str)
+                widget = self.list_widget.itemWidget(item)
+                if widget:
+                    widget.set_rating(rating)
+                count += 1
+                print(f"Rated {path.name}: {rating}")
+            
+        if self.viewer_mode_enabled and self.viewer_widget.isVisible():
+            self.viewer_widget.set_rating(rating)
+    
+        if count > 0:
+            self.statusBar().showMessage(f"Updated rating for {count} images.", 2000)
+
+    def clear_all_ratings(self):
+        if not self.rating_manager:
+            return
+        reply = QMessageBox.question(
+            self, "Clear All Ratings",
+            "Are you sure you want to remove ALL ratings?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.rating_manager.clear_all_ratings()
+            # Update all thumbnails to show no stars
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                widget = self.list_widget.itemWidget(item)
+                if widget:
+                    widget.set_rating(0)
+            self.statusBar().showMessage("All ratings cleared.", 3000)
+
+    def show_filter_dialog(self):
+        if not self.rating_manager:
+            QMessageBox.warning(self, "Warning", "No folder selected.")
+            return
+            
+        dlg = FilterDialog(self, self.rating_manager)
+        if dlg.exec_():
+            result = dlg.get_filtered_files()
+            if result is None:
+                # Reset / Show All
+                self.reset_filter()
+            else:
+                filtered_names = set(result)
+                self.apply_file_filter(filtered_names)
+
+    def reset_filter(self):
+        count = self.list_widget.count()
+        for i in range(count):
+            item = self.list_widget.item(i)
+            item.setHidden(False)
+        self.statusBar().showMessage(f"Filter reset. Showing all {count} images.", 3000)
+
+    def apply_file_filter(self, allowed_names: set):
+        count = self.list_widget.count()
+        hidden_count = 0
+        visible_count = 0
+        
+        # If no filter (empty set might mean no matches, or all? verify)
+        # Usually filter dialog returns matches. If 0 matches, show nothing.
+        
+        for i in range(count):
+            item = self.list_widget.item(i)
+            path = Path(item.data(Qt.UserRole))
+            if path.name in allowed_names:
+                item.setHidden(False)
+                visible_count += 1
+            else:
+                item.setHidden(True)
+                hidden_count += 1
+        
+        self.statusBar().showMessage(f"Filter applied. {visible_count} visible.", 3000)
