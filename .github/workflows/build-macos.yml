@@ -3,8 +3,8 @@ name: Build macOS App
 on:
   push:
     tags:
-      - 'v*'       # v1.0.0 같은 버전 태그에서 트리거
-  workflow_dispatch: # GitHub UI에서 수동 트리거 가능
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-macos:
@@ -25,20 +25,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 4. Homebrew 시스템 의존성 설치 (rawpy용 libraw, pillow-heif용 libheif)
+      # 4. Homebrew 시스템 의존성 설치
       - name: Install Homebrew dependencies
         run: |
           brew install libraw libheif
 
       # 5. Python 의존성 설치
+      #    exifread: metadata.py에서 사용 (requirements.txt에 누락되어 있음)
       - name: Install Python dependencies
         env:
           PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 Pillow rawpy pillow-heif==1.2.1 pyinstaller numpy
+          pip install PySide6 Pillow rawpy pillow-heif==1.2.1 exifread numpy pyinstaller
 
-      # 6. macOS spec 파일 생성 (repo에 없을 경우를 대비)
+      # 6. macOS spec 파일 생성
       - name: Create macOS spec file
         run: |
           cat > ssc_macos.spec << 'EOF'
@@ -59,13 +60,16 @@ jobs:
               'pillow_heif',
               'PIL',
               'PIL.Image',
+              'PIL.ImageOps',
               'PIL.ImageQt',
+              'PIL.ExifTags',
+              'exifread',
               'numpy',
           ]
 
           a = Analysis(
               ['run.py'],
-              pathex=[],
+              pathex=['.'],
               binaries=[],
               datas=datas,
               hiddenimports=hiddenimports,
@@ -127,19 +131,19 @@ jobs:
         run: |
           pyinstaller ssc_macos.spec --noconfirm --clean
 
-      # 8. 빌드 결과물 경로 확인 (디버깅)
+      # 8. 빌드 결과물 구조 확인 (디버깅)
       - name: List dist directory
-        run: |
-          find dist -type d | head -20
+        run: find dist -maxdepth 3
 
       # 9. .app을 zip으로 압축
+      #    BUNDLE 방식: dist/SequentialSelector.app 에 생성됨
       - name: Compress .app into zip
         run: |
-          cd dist/SequentialSelector
-          zip -r "../../SequentialSelector-macOS.zip" "SequentialSelector.app"
-          cd ../..
+          cd dist
+          zip -r "../SequentialSelector-macOS.zip" "SequentialSelector.app"
+          cd ..
 
-      # 10. 아티팩트 업로드 (항상, 검사용)
+      # 10. 아티팩트 업로드
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
