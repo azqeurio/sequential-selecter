@@ -1,10 +1,18 @@
-from pathlib import Path
-import json, exifread
+﻿from pathlib import Path
+from fractions import Fraction
+import json
+
+try:
+    import exifread
+    EXIFREAD_OK = True
+except Exception:
+    exifread = None
+    EXIFREAD_OK = False
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsTextItem,
     QFileDialog, QMessageBox, QFrame, QGraphicsRectItem, QComboBox, QColorDialog,
-    QSlider, QProgressBar, QLineEdit, QScrollArea, QApplication, QSplitter
+    QSlider, QProgressBar, QLineEdit, QScrollArea, QApplication, QSplitter, QTabWidget
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer, QThread
 from PySide6.QtGui import QPixmap, QColor, QFont, QPen, QBrush, QImage, QPainter, QFontDatabase
@@ -230,10 +238,7 @@ class TemplateScene(QGraphicsScene):
             "frame_color": self.frame_item.brush().color().name(),
             "text_color": self.current_text_color.name(),
             "font": self.current_font.family(),
-            "edit_params": self.edit_params.copy(),
-            "lut_path": self.lut_path,
             "texts": [],
-            "logo": None,
             "image_pos": {"x": self.pixmap_item.pos().x(), "y": self.pixmap_item.pos().y()}
         }
         for txt in self.text_items:
@@ -415,11 +420,22 @@ class ExifEditorWidget(QWidget):
         work_layout = QHBoxLayout()
         self.layout.addLayout(work_layout)
         
-        self.preview_splitter = QSplitter(Qt.Horizontal)
-        self.preview_splitter.setStyleSheet("QSplitter::handle { background: #4CAF50; width: 2px; }")
+        self.preview_tabs = QTabWidget()
+        self.preview_tabs.setStyleSheet("""
+            QTabBar::tab { background: #333; color: #ccc; padding: 10px 20px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+            QTabBar::tab:selected { background: #2ECC71; color: black; }
+            QTabWidget::pane { border: none; }
+        """)
+        self.preview_tabs.currentChanged.connect(self._on_tab_changed)
         
-        work_layout.addWidget(self.preview_splitter, 1)
+        work_layout.addWidget(self.preview_tabs, 1)
         self._setup_right_panel(work_layout)
+
+    def _on_tab_changed(self, index):
+        if index >= 0:
+            orientation = self.preview_tabs.tabText(index).split()[0].lower()
+            if self.active_orientation != orientation:
+                self.set_active_view(orientation)
 
     def _setup_top_bar(self):
         self.top_bar = QFrame(self)
@@ -476,7 +492,7 @@ class ExifEditorWidget(QWidget):
         
         # Active Status Label
         self.lbl_active_status = QLabel("<b>ACTIVE: None</b>")
-        self.lbl_active_status.setStyleSheet("color: #4CAF50; font-size: 14px;")
+        self.lbl_active_status.setStyleSheet("color: #2ECC71; font-size: 14px;")
         self.tool_layout.addWidget(self.lbl_active_status)
         
         # 1. Independent Margins
@@ -576,7 +592,7 @@ class ExifEditorWidget(QWidget):
         
         self.btn_export = QPushButton("Export All Selected")
         self.btn_export.setFixedHeight(40)
-        self.btn_export.setStyleSheet("QPushButton { background: #4CAF50; color: white; border-radius: 6px; padding: 4px 12px; font-weight: bold; }")
+        self.btn_export.setStyleSheet("QPushButton { background: #2ECC71; color: black; border-radius: 6px; padding: 4px 12px; font-weight: bold; } QPushButton:hover { background: #27AE60; }")
         self.btn_export.clicked.connect(self.run_batch_export)
         self.tool_layout.addWidget(self.btn_export)
         
@@ -593,10 +609,8 @@ class ExifEditorWidget(QWidget):
         self.lbl_active_status.setText(f"<b>ACTIVE: {orientation.upper()}</b>")
         
         for o, v in self.views.items():
-            if o == orientation:
-                v.setStyleSheet("border: 2px solid #4CAF50;")
-            else:
-                v.setStyleSheet("border: 1px solid #333;")
+            if hasattr(v, 'setStyleSheet'):
+                pass # Border no longer needed with tabs
                 
         self._sync_sidebar_texts()
         self._sync_sidebar_margins()
@@ -679,8 +693,9 @@ class ExifEditorWidget(QWidget):
             
     def load_preset(self):
         scene = self._active_scene()
-        if not scene: return
-        
+        if not scene:
+            return
+
         path, _ = QFileDialog.getOpenFileName(self, "Load Preset", "", "JSON (*.json)")
         if path:
             try:
@@ -691,7 +706,6 @@ class ExifEditorWidget(QWidget):
                 self._sync_sidebar_texts()
                 self._sync_sidebar_margins()
                 self.combo_font.setCurrentText(preset.get("font", "Arial"))
-                self._sync_sidebar_edits()
                 self._render_scene_image(scene)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load preset: {e}")
@@ -766,9 +780,11 @@ class ExifEditorWidget(QWidget):
     def load_images(self, paths: list[Path]):
         self.images.clear()
         
-        while self.preview_splitter.count():
-            item = self.preview_splitter.widget(0)
-            item.setParent(None)
+        while self.preview_tabs.count() > 0:
+            w = self.preview_tabs.widget(0)
+            self.preview_tabs.removeTab(0)
+            if w:
+                w.deleteLater()
             
         self.templates.clear()
         self.views.clear()
@@ -779,8 +795,9 @@ class ExifEditorWidget(QWidget):
         
         for p in paths:
             try:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 with Image.open(str(p)) as im:
+                    im = ImageOps.exif_transpose(im)
                     w, h = im.size
                     orientation = "landscape" if w >= h else "portrait"
                     
@@ -795,6 +812,8 @@ class ExifEditorWidget(QWidget):
                     with rawpy.imread(str(p)) as raw:
                         sizes = raw.sizes
                         w, h = sizes.raw_width, sizes.raw_height
+                        if sizes.flip >= 5:
+                            w, h = h, w
                         orientation = "landscape" if w >= h else "portrait"
                         
                     exif = self.extract_exif_data(p)
@@ -833,15 +852,11 @@ class ExifEditorWidget(QWidget):
         container = QWidget()
         l = QVBoxLayout(container)
         l.setContentsMargins(0,0,0,0)
-        lbl = QLabel(orientation.capitalize() + " Template")
-        lbl.setStyleSheet("background: #333; color: white; padding: 5px; font-weight: bold;")
-        lbl.setAlignment(Qt.AlignCenter)
-        l.addWidget(lbl)
         l.addWidget(view, 1)
         
         self.templates[orientation] = scene
         self.views[orientation] = container
-        self.preview_splitter.addWidget(container)
+        self.preview_tabs.addTab(container, orientation.capitalize() + " Template")
         
         img = load_pil_image(sample_path, max_size=2000)
         if img:
@@ -859,25 +874,47 @@ class ExifEditorWidget(QWidget):
 
     def extract_exif_data(self, path: Path):
         data = {}
+        if not EXIFREAD_OK:
+            return data
+
+        def _to_float(value):
+            if value is None:
+                return None
+            s = str(value).strip()
+            if not s:
+                return None
+            try:
+                return float(Fraction(s))
+            except Exception:
+                try:
+                    return float(s)
+                except Exception:
+                    return None
+
         try:
             with open(path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
-                
-            camera = str(tags.get('Image Model', tags.get('Image Make', '')))
-            lens = str(tags.get('EXIF LensModel', ''))
-            focal = str(tags.get('EXIF FocalLength', ''))
-            aperture = str(tags.get('EXIF FNumber', ''))
-            iso = str(tags.get('EXIF ISOSpeedRatings', ''))
-            shutter = str(tags.get('EXIF ExposureTime', ''))
-            
-            aperture_str = f"f/{eval(aperture)}" if aperture else ""
-            focal_str = f"{eval(focal)}mm" if focal else ""
+
+            camera = str(tags.get('Image Model', tags.get('Image Make', ''))).strip()
+            lens = str(tags.get('EXIF LensModel', '')).strip()
+            focal = tags.get('EXIF FocalLength')
+            aperture = tags.get('EXIF FNumber')
+            iso = str(tags.get('EXIF ISOSpeedRatings', '')).strip()
+            shutter = str(tags.get('EXIF ExposureTime', '')).strip()
+
+            focal_val = _to_float(focal)
+            aperture_val = _to_float(aperture)
+            focal_str = f"{focal_val:g}mm" if focal_val is not None else ""
+            aperture_str = f"f/{aperture_val:g}" if aperture_val is not None else ""
             settings_str = f"{focal_str}  {aperture_str}  {shutter}s  ISO {iso}".strip()
-            
-            if camera: data["camera"] = camera
-            if lens: data["lens"] = lens
-            if settings_str: data["settings"] = settings_str
-                
+
+            if camera:
+                data["camera"] = camera
+            if lens:
+                data["lens"] = lens
+            if settings_str:
+                data["settings"] = settings_str
+
         except Exception:
             pass
         return data
@@ -920,11 +957,18 @@ class ExifEditorWidget(QWidget):
         self.progress_bar.show()
         
         self.thread = BatchExportThread(self.images, self.templates, export_params)
-        self.thread.progress.connect(self.progress_bar.setValue)
+        self.thread.progress.connect(self._on_export_progress)
         self.thread.finished.connect(self._on_export_finished)
         self.thread.start()
+
+    def _on_export_progress(self, current, total):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
 
     def _on_export_finished(self, success, fail):
         self.progress_bar.hide()
         self.btn_export.setEnabled(True)
         QMessageBox.information(self, "Export Complete", f"Successfully exported {success} images.\nFailed: {fail}")
+
+
+

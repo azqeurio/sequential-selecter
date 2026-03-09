@@ -1,9 +1,9 @@
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
-    QPushButton, QListWidget, QListWidgetItem, QCheckBox
+﻿from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QPushButton
 )
-from PySide6.QtCore import Qt
 from .styles import DARK_STYLE
+
 
 class FilterDialog(QDialog):
     def __init__(self, parent, rating_manager):
@@ -12,8 +12,8 @@ class FilterDialog(QDialog):
         self.resize(400, 500)
         self.rating_manager = rating_manager
         self.setStyleSheet(DARK_STYLE)
-        
-        self.filtered_files = [] # Result
+
+        self.filtered_files = []  # Result
 
         self._setup_ui()
         self._load_filter_options()
@@ -45,17 +45,16 @@ class FilterDialog(QDialog):
         self.btn_apply.clicked.connect(self.apply_filter)
         self.btn_apply.setStyleSheet("background-color: #4CAF50; color: white;")
         btn_layout.addWidget(self.btn_apply)
-        
+
         self.btn_reset = QPushButton("Reset")
         self.btn_reset.clicked.connect(self.reset_filters)
         self.btn_reset.setStyleSheet("background-color: #FF5555; color: white;")
         btn_layout.addWidget(self.btn_reset)
 
-        
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(self.btn_cancel)
-        
+
         layout.addLayout(btn_layout)
 
     def _load_filter_options(self):
@@ -64,12 +63,11 @@ class FilterDialog(QDialog):
         self.combo_camera.addItems(cameras)
 
     def apply_filter(self):
-        min_rating_idx = self.combo_rating.currentIndex() # 0=Any, 1=1 Star...
+        min_rating_idx = self.combo_rating.currentIndex()  # 0=Any, 1=1 Star...
         target_date = self.combo_date.currentText()
         target_camera = self.combo_camera.currentText()
-        
-        # If all "Any" are selected, we should perhaps return None to indicate "Show All"
-        # including unrated images.
+
+        # If all "Any" are selected, return None to indicate "Show All".
         if min_rating_idx == 0 and target_date == "Any" and target_camera == "Any":
             self.filtered_files = None
             self.accept()
@@ -77,23 +75,22 @@ class FilterDialog(QDialog):
 
         all_ratings = self.rating_manager.load_ratings()
         self.filtered_files = []
-        
+
         for r in all_ratings:
             # Rating Check
-            if min_rating_idx > 0:
-                if r['rating'] < min_rating_idx:
-                    continue
-            
+            if min_rating_idx > 0 and r['rating'] < min_rating_idx:
+                continue
+
             # Date Check
             if target_date != "Any" and r['date'] != target_date:
                 continue
-                
+
             # Camera Check
             if target_camera != "Any" and r['camera'] != target_camera:
                 continue
-                
-            self.filtered_files.append(r['filename'])
-            
+
+            self.filtered_files.append(r.get('key') or r.get('filename'))
+
         self.accept()
 
     def reset_filters(self):

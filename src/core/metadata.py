@@ -1,12 +1,12 @@
-import json
+﻿import json
 import shutil
 import subprocess
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 try:
     from PIL import Image
-    from PIL.ExifTags import TAGS
     PIL_OK = True
 except Exception:
     PIL_OK = False
@@ -24,9 +24,12 @@ RAW_EXT = {
 }
 PROC_EXT = {".jpg", ".jpeg", ".heic", ".heif", ".png"}
 
+
+@lru_cache(maxsize=1)
 def which_exiftool() -> str | None:
     """Return the path to the exiftool executable if available, otherwise None."""
     return shutil.which("exiftool")
+
 
 def parse_dt_str(s: str) -> datetime | None:
     """Convert an EXIF date string into a :class:`datetime` object."""
@@ -39,6 +42,7 @@ def parse_dt_str(s: str) -> datetime | None:
         except Exception:
             continue
     return None
+
 
 def exif_from_pillow(path: Path):
     """Extract date, camera and lens metadata using Pillow."""
@@ -61,6 +65,7 @@ def exif_from_pillow(path: Path):
             return dto, (model or None), (lens or None)
     except Exception:
         return None, None, None
+
 
 def exif_from_exifread(path: Path):
     """Extract EXIF metadata using the :mod:`exifread` module."""
@@ -89,6 +94,7 @@ def exif_from_exifread(path: Path):
     except Exception:
         return None, None, None
 
+
 def exif_from_exiftool(path: Path):
     """Extract EXIF metadata using the external ``exiftool`` executable."""
     exe = which_exiftool()
@@ -111,12 +117,14 @@ def exif_from_exiftool(path: Path):
     except Exception:
         return None, None, None
 
+
 def extract_meta(path: Path) -> dict:
     """
     Extract date, camera, lens and file type information from the given file.
     """
     dto = cam = lens = None
-    # pillow
+
+    # Fast path: pillow first
     d1, c1, l1 = exif_from_pillow(path)
     if d1:
         dto = d1
@@ -124,33 +132,40 @@ def extract_meta(path: Path) -> dict:
         cam = c1
     if l1:
         lens = l1
-    # exifread
-    d2, c2, l2 = exif_from_exifread(path)
-    if not dto and d2:
-        dto = d2
-    if not cam and c2:
-        cam = c2
-    if not lens and l2:
-        lens = l2
-    # exiftool
-    d3, c3, l3 = exif_from_exiftool(path)
-    if not dto and d3:
-        dto = d3
-    if not cam and c3:
-        cam = c3
-    if not lens and l3:
-        lens = l3
+
+    # Then exifread only if still missing
+    if dto is None or cam is None or lens is None:
+        d2, c2, l2 = exif_from_exifread(path)
+        if not dto and d2:
+            dto = d2
+        if not cam and c2:
+            cam = c2
+        if not lens and l2:
+            lens = l2
+
+    # exiftool is expensive; use as last resort only when fields are still missing
+    if dto is None or cam is None or lens is None:
+        d3, c3, l3 = exif_from_exiftool(path)
+        if not dto and d3:
+            dto = d3
+        if not cam and c3:
+            cam = c3
+        if not lens and l3:
+            lens = l3
+
     # fallback
     if dto is None:
         try:
             dto = datetime.fromtimestamp(path.stat().st_mtime)
         except Exception:
             dto = datetime.now()
+
     year = f"{dto:%Y}"
     month = f"{dto:%Y-%m}"
     date = f"{dto:%Y-%m-%d}"
     cam = sanitize(cam or "Unknown Camera")
     lens = sanitize(lens or "Unknown Lens")
+
     ext = path.suffix.lower()
     if ext in RAW_EXT:
         kind = "raw"
@@ -158,6 +173,7 @@ def extract_meta(path: Path) -> dict:
         kind = "jpg"
     else:
         kind = "other"
+
     return {
         "path": path,
         "dt": dto,

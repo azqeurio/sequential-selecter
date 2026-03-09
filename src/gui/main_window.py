@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 import shutil
 from pathlib import Path
@@ -62,6 +62,7 @@ class GridSelectorWindow(QMainWindow):
             
         # UI Fade Animation Tracker
         self._current_animation = None
+        self._entrance_animated = False
             
         self.resize(1400, 850)
 
@@ -163,6 +164,13 @@ class GridSelectorWindow(QMainWindow):
         
         self.thumb_executor.shutdown(wait=False)
         self.preview_executor.shutdown(wait=False)
+
+        # Stop any active file operation threads.
+        for thread, _worker in list(self.active_file_ops):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(1000)
+
         if self.file_worker_thread.isRunning():
             self.file_worker_thread.quit()
             self.file_worker_thread.wait()
@@ -171,6 +179,9 @@ class GridSelectorWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._init_layout_sizes)
+        if not self._entrance_animated:
+            self._entrance_animated = True
+            QTimer.singleShot(20, self._play_entrance_animation)
 
     def _init_layout_sizes(self):
         if hasattr(self, 'splitter_main'):
@@ -188,6 +199,23 @@ class GridSelectorWindow(QMainWindow):
             grid_h = thumb_size + self.list_widget._grid_padding_h
             self.list_widget.setIconSize(QSize(thumb_size, thumb_size))
             self.list_widget.setGridSize(QSize(grid_w, grid_h))
+
+    def _animate_fade_in(self, widget, duration=220):
+        # Disabled QGraphicsOpacityEffect due to QPainter imbalances during threaded loading
+        pass
+
+    def _play_entrance_animation(self):
+        self._animate_fade_in(self.left_stack, duration=220)
+        self._animate_fade_in(self.right_widget, duration=280)
+        self._animate_fade_in(self.bottom_widget, duration=320)
+
+    def _switch_main_page(self, index: int):
+        if self.main_stack.currentIndex() == index:
+            return
+        self.main_stack.setCurrentIndex(index)
+        page = self.main_stack.currentWidget()
+        if page is not None:
+            self._animate_fade_in(page, duration=180)
 
 
     def _setup_ui(self):
@@ -250,7 +278,7 @@ class GridSelectorWindow(QMainWindow):
         left_layout.addLayout(top_btn_layout)
 
         # --- LEFT: Folder Selection (Library Mode) ---
-        self.btn_select_folder = QPushButton("📁 Load Folder")
+        self.btn_select_folder = QPushButton("Load Folder")
         self.btn_select_folder.setObjectName("SelectFolderBtn")
         self.btn_select_folder.clicked.connect(self.choose_folder)
         self.btn_select_folder.setFixedHeight(36)
@@ -286,11 +314,11 @@ class GridSelectorWindow(QMainWindow):
         
         mode_style = """
             QPushButton { 
-                font-weight: bold; font-size: 13px; color: #888; background: #222; 
-                border: 1px solid #333; padding: 0 20px;
+                font-weight: bold; font-size: 13px; color: #A1B8A6; background: #1C2420; 
+                border: 1px solid #2B3832; padding: 0 20px;
             }
-            QPushButton:hover { color: #ccc; background: #2a2a2a; }
-            QPushButton:checked { color: white; background: #3a3a3c; border-bottom: 2px solid #4CAF50; }
+            QPushButton:hover { color: #D1E5D7; background: #232E29; }
+            QPushButton:checked { color: white; background: #2A3932; border-bottom: 2px solid #2ECC71; }
         """
         self.btn_mode_library.setStyleSheet(mode_style)
         self.btn_mode_develop.setStyleSheet(mode_style)
@@ -305,9 +333,9 @@ class GridSelectorWindow(QMainWindow):
         self.btn_mode_develop.clicked.connect(lambda: self.switch_master_mode("develop"))
         self.btn_mode_export.clicked.connect(lambda: self.switch_master_mode("export"))
         
-        self.btn_done_mode = QPushButton("✔️ DONE")
+        self.btn_done_mode = QPushButton("DONE")
         self.btn_done_mode.setFixedHeight(36)
-        self.btn_done_mode.setStyleSheet("QPushButton { font-weight: bold; font-size: 13px; background-color: #4CAF50; color: white; border-radius: 4px; padding: 0 20px; } QPushButton:hover { background-color: #45a049; }")
+        self.btn_done_mode.setStyleSheet("QPushButton { font-weight: bold; font-size: 13px; background-color: #2ECC71; color: black; border-radius: 4px; padding: 0 20px; } QPushButton:hover { background-color: #27AE60; }")
         self.btn_done_mode.clicked.connect(self.on_done_clicked)
         self.btn_done_mode.hide()
         
@@ -347,7 +375,7 @@ class GridSelectorWindow(QMainWindow):
         self.btn_hq = QPushButton("HQ Load")
         self.btn_hq.setFixedWidth(80)
         self.btn_hq.setFixedHeight(36)
-        self.btn_hq.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #45a049; }")
+        self.btn_hq.setStyleSheet("QPushButton { background-color: #2ECC71; color: black; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #27AE60; }")
         self.btn_hq.clicked.connect(self.force_hq_reload)
         top_btn_layout.addWidget(self.btn_hq)
 
@@ -550,7 +578,7 @@ class GridSelectorWindow(QMainWindow):
                 color: white;
             }
             QProgressBar::chunk {
-                background-color: #4CAF50;
+                background-color: #2ECC71;
             }
         """)
         org_log_layout.addWidget(self.org_progress)
@@ -571,8 +599,8 @@ class GridSelectorWindow(QMainWindow):
         
         self.right_layout.addWidget(self.bottom_widget)
 
-        self.drop_label1 = DropLabel("Drag & Drop → Target1", self, 1)
-        self.drop_label2 = DropLabel("Drag & Drop → Target2", self, 2)
+        self.drop_label1 = DropLabel("Drag & Drop -> Target1", self, 1)
+        self.drop_label2 = DropLabel("Drag & Drop -> Target2", self, 2)
         self.drop_label1.setFixedHeight(36)
         self.drop_label2.setFixedHeight(36)
         self.drop_label1.setWordWrap(True)
@@ -716,7 +744,7 @@ class GridSelectorWindow(QMainWindow):
             if len(self.list_widget.selectedItems()) > 0:
                 self.toggle_photo_mode(False, force_on=True)
             else:
-                 self.main_stack.setCurrentIndex(0) 
+                 self._switch_main_page(0)
             
         elif mode == "export":
             self.btn_target1.hide()
@@ -729,10 +757,10 @@ class GridSelectorWindow(QMainWindow):
             if len(self.list_widget.selectedItems()) > 0:
                 self.toggle_exif_mode(False, force_on=True)
             else:
-                 self.main_stack.setCurrentIndex(0) 
+                 self._switch_main_page(0)
             
         else: # library
-            self.main_stack.setCurrentIndex(0)
+            self._switch_main_page(0)
 
     def on_done_clicked(self):
         if len(self.list_widget.selectedItems()) == 0:
@@ -762,64 +790,81 @@ class GridSelectorWindow(QMainWindow):
         if not self.undo_stack:
             QMessageBox.information(self, "Info", "되돌릴 이동이 없습니다.")
             return
+
         moves = self.undo_stack.pop()
-        self.redo_stack.append(list(moves))
-        
-        # Reverse moves: (dest, src) -> src is original location
-        # We need to move from dest -> src
+
+        # Reverse moves: (dest, src) => move dest -> src
         reverse_ops = []
         for dest_path, src_path in moves:
-            if not dest_path.exists(): continue
+            if not dest_path.exists():
+                continue
+
             target_path = src_path
-            
-            # Handle collision on restore
             if target_path.exists():
                 base = src_path.stem
-                target_path = src_path.with_stem(f"{base}_restored")
+                ext = src_path.suffix
+                target_path = src_path.with_name(f"{base}_restored{ext}")
                 i = 1
                 while target_path.exists():
-                    target_path = src_path.with_stem(f"{base}_restored_{i}")
+                    target_path = src_path.with_name(f"{base}_restored_{i}{ext}")
                     i += 1
-            
+
             reverse_ops.append((dest_path, target_path))
 
-        if reverse_ops:
-            self._start_file_operation(reverse_ops, 'move', is_undo=True)
+        if not reverse_ops:
+            self.statusBar().showMessage("Undo skipped: no movable files found.", 2500)
+            return
+
+        def _on_finished(success_ops, errors):
+            if success_ops:
+                # For redo: each tuple is (original_target_path, restored_path)
+                self.redo_stack.append([(src, dest) for src, dest in success_ops])
+            if self.current_folder:
+                self.load_folder_grid(self.current_folder)
+
+            if errors:
+                self.statusBar().showMessage(
+                    f"Undo completed with errors ({len(success_ops)} success, {len(errors)} failed).",
+                    4000,
+                )
+            else:
+                self.statusBar().showMessage(f"Undo complete ({len(success_ops)} files).", 2500)
+
+        self._start_file_operation(reverse_ops, 'move', on_finished=_on_finished)
 
     def redo_last_move(self):
         if not self.redo_stack:
             QMessageBox.information(self, "Info", "다시 적용할 이동이 없습니다.")
             return
+
         moves = self.redo_stack.pop()
-        
-        # Redo is basically repeating the original moves
-        # but we need to check if source still exists (or was restored)
+
+        # moves contract: (dest_path, src_path) where we should move src_path -> dest_path
         redo_ops = []
-        recorded_moves = [] # For undo stack
-        
         for dest_path, src_path in moves:
-             # src_path is the ORIGINAL source. 
-             # But if we undid, the file should be back at src_path (or restored name)
-             # This is tricky because Undo might have renamed it.
-             # Ideally Undo should return the EXACT restore path it used.
-             # For now, we try src_path or typical restore names?
-             
-             candidate = src_path
-             if not candidate.exists():
-                 # Try restored name guess?
-                 base = src_path.stem
-                 candidate = src_path.with_stem(f"{base}_restored")
-             
-             if not candidate.exists(): continue
-             
-             redo_ops.append((candidate, dest_path))
-             recorded_moves.append((dest_path, src_path)) # Keep original contract
-        
-        if redo_ops:
-            # We push back to undo stack immediately? Or wait for finish?
-            # Standard pattern: push to undo stack
-            self.undo_stack.append(recorded_moves)
-            self._start_file_operation(redo_ops, 'move', is_undo=False)
+            if src_path.exists():
+                redo_ops.append((src_path, dest_path))
+
+        if not redo_ops:
+            self.statusBar().showMessage("Redo skipped: source files not found.", 2500)
+            return
+
+        def _on_finished(success_ops, errors):
+            if success_ops:
+                # For undo: store (actual_dest, source_before_redo)
+                self.undo_stack.append([(dest, src) for src, dest in success_ops])
+            if self.current_folder:
+                self.load_folder_grid(self.current_folder)
+
+            if errors:
+                self.statusBar().showMessage(
+                    f"Redo completed with errors ({len(success_ops)} success, {len(errors)} failed).",
+                    4000,
+                )
+            else:
+                self.statusBar().showMessage(f"Redo complete ({len(success_ops)} files).", 2500)
+
+        self._start_file_operation(redo_ops, 'move', on_finished=_on_finished)
 
     def toggle_language(self):
         self.language = 'en' if self.language == 'ko' else 'ko'
@@ -970,123 +1015,93 @@ class GridSelectorWindow(QMainWindow):
         files.sort(key=lambda x: x.name)
 
         # Detect Pairs and Ask User
+        def _parent_key(p: Path) -> str:
+            try:
+                rel_parent = p.parent.relative_to(folder)
+                return rel_parent.as_posix().lower()
+            except ValueError:
+                return str(p.parent).lower()
+
+        def _base_stem(stem: str) -> str:
+            s = stem.lower()
+            if "_" in s:
+                left, right = s.rsplit("_", 1)
+                if right.isdigit():
+                    return left
+            return s
+
+        def _build_group_map(paths: list[Path]) -> dict[tuple[str, str], list[Path]]:
+            group_map: dict[tuple[str, str], list[Path]] = {}
+            for fp in paths:
+                key = (_parent_key(fp), _base_stem(fp.stem))
+                if key not in group_map:
+                    group_map[key] = []
+                group_map[key].append(fp)
+            return group_map
+
         if ask_pairing:
-             self.pair_mode_enabled = False
-             # Detailed Analysis using Fuzzy Logic
-             # 1. Group by Stem (Case Insensitive, ignore parent)
-             stem_map_temp = {}
-             for f in files:
-                 stem = f.stem.lower()
-                 if stem not in stem_map_temp: stem_map_temp[stem] = []
-                 stem_map_temp[stem].append(f)
-             
-             # 2. Fuzzy Match: Handle _1, _2 suffixes for RAWs
-             # If we have 'img_1' (RAW) and 'img' (JPG), merge them.
-             stems = list(stem_map_temp.keys())
-             for s in stems:
-                 if s not in stem_map_temp: continue # Already merged
-                 
-                 # Check if this stem looks like it has a suffix (e.g. ends with _digit)
-                 if '_' in s and s[-1].isdigit():
-                     base = s.rsplit('_', 1)[0]
-                     if base in stem_map_temp:
-                         # Merge 's' into 'base'
-                         # But only if 's' is mostly RAW? Or just merge.
-                         stem_map_temp[base].extend(stem_map_temp[s])
-                         del stem_map_temp[s]
+            self.pair_mode_enabled = False
+            stem_map_temp = _build_group_map(files)
 
-             count_pairs = 0
-             unpaired_count = 0
-             folders_with_pairs = set()
+            count_pairs = 0
+            unpaired_count = 0
+            folders_with_pairs = set()
 
-             for group in stem_map_temp.values():
-                 # Check if meaningful pair (e.g. RAW+JPG)
-                 has_raw = any(g.suffix.lower() in RAW_EXT for g in group)
-                 has_jpg = any(g.suffix.lower() in PROC_EXT for g in group)
-                 
-                 if has_raw and has_jpg:
-                     count_pairs += 1
-                     # Identify folder names. Since we ignore parent in grouping, a pair might span folders!
-                     # But usually they are in 'raw' and 'jpg' subfolders.
-                     # We can list ALL parent folders involved in pairs.
-                     for g in group:
-                         try:
-                             # Show relative folder name from root?
-                             rel = g.parent.relative_to(folder)
-                             folders_with_pairs.add(str(rel))
-                         except ValueError:
-                             folders_with_pairs.add(g.parent.name)
-                 else:
-                     unpaired_count += len(group)
+            for group in stem_map_temp.values():
+                has_raw = any(g.suffix.lower() in RAW_EXT for g in group)
+                has_jpg = any(g.suffix.lower() in PROC_EXT for g in group)
 
-             if count_pairs > 0:
-                 # Format folder list (limit to 3)
-                 folder_list = sorted(list(folders_with_pairs))
-                 folder_display = ", ".join(folder_list[:3])
-                 if len(folder_list) > 3:
-                     folder_display += ", ..."
-                 elif not folder_display or folder_display == ".":
-                     folder_display = "(Root)"
+                if has_raw and has_jpg:
+                    count_pairs += 1
+                    for g in group:
+                        try:
+                            rel = g.parent.relative_to(folder)
+                            folders_with_pairs.add(str(rel))
+                        except ValueError:
+                            folders_with_pairs.add(g.parent.name)
+                else:
+                    unpaired_count += len(group)
 
-                 tr = self.translations.get(self.language, {})
-                 title = tr.get('pair_prompt_title', 'Group Files?')
-                 # New template uses: folder_count, folder_names, pairs, unpaired
-                 msg_tmpl = tr.get('pair_prompt_msg', 'Analysis:\nPairs: {pairs}\nUnpaired: {unpaired}')
-                 
-                 msg = msg_tmpl.format(
-                     folder_count=len(folders_with_pairs),
-                     folder_names=folder_display,
-                     pairs=count_pairs,
-                     unpaired=unpaired_count
-                 )
-                 
-                 ret = QMessageBox.question(self, title, msg, QMessageBox.Yes | QMessageBox.No)
-                 
-                 # Set state based on answer
-                 self.pair_mode_enabled = (ret == QMessageBox.Yes)
+            if count_pairs > 0:
+                folder_list = sorted(list(folders_with_pairs))
+                folder_display = ", ".join(folder_list[:3])
+                if len(folder_list) > 3:
+                    folder_display += ", ..."
+                elif not folder_display or folder_display == ".":
+                    folder_display = "(Root)"
+
+                tr = self.translations.get(self.language, {})
+                title = tr.get('pair_prompt_title', 'Group Files?')
+                msg_tmpl = tr.get('pair_prompt_msg', 'Analysis:\nPairs: {pairs}\nUnpaired: {unpaired}')
+
+                msg = msg_tmpl.format(
+                    folder_count=len(folders_with_pairs),
+                    folder_names=folder_display,
+                    pairs=count_pairs,
+                    unpaired=unpaired_count
+                )
+
+                ret = QMessageBox.question(self, title, msg, QMessageBox.Yes | QMessageBox.No)
+                self.pair_mode_enabled = (ret == QMessageBox.Yes)
 
         # RAW+JPG Filter Logic
         if self.pair_mode_enabled:
-            # Group by stem (Fuzzy)
-            stem_map = {}
-            for f in files:
-                stem = f.stem.lower()
-                if stem not in stem_map:
-                    stem_map[stem] = []
-                stem_map[stem].append(f)
+            stem_map = _build_group_map(files)
 
-            # Re-apply Fuzzy Merge logic
-            stems = list(stem_map.keys())
-            for s in stems:
-                if s not in stem_map: continue
-                if '_' in s and s[-1].isdigit():
-                    base = s.rsplit('_', 1)[0]
-                    if base in stem_map:
-                        stem_map[base].extend(stem_map[s])
-                        del stem_map[s]
-            
-            final_groups = [] # List of (representative, [siblings])
-            for group in stem_map.items():
-                # group is (stem, [files])
-                group_files = group[1]
-                
-                raw_cand = None
-                for g in group_files:
-                    if g.suffix.lower() in RAW_EXT:
-                        raw_cand = g
-                        break
-                
+            final_groups = []  # List of (representative, [siblings])
+            for group_files in stem_map.values():
+                group_files = sorted(group_files, key=lambda p: p.name.lower())
+                raw_cand = next((g for g in group_files if g.suffix.lower() in RAW_EXT), None)
                 rep = raw_cand if raw_cand else group_files[0]
                 siblings = [g for g in group_files if g != rep]
                 final_groups.append((rep, siblings))
-            
-            final_groups.sort(key=lambda x: x[0].name)
+
+            final_groups.sort(key=lambda x: x[0].name.lower())
             display_data = final_groups
-            
+
         else:
             # Normal Mode (No grouping)
             display_data = [(f, []) for f in files]
-
         # --- Populate List and Start Local Generation ---
         visible_paths = []
         
@@ -1094,8 +1109,7 @@ class GridSelectorWindow(QMainWindow):
         rating_map = {}
         if self.rating_manager:
             ratings = self.rating_manager.load_ratings()
-            rating_map = {r['filename']: r['rating'] for r in ratings}
-
+            rating_map = {r.get("key", r.get("filename", "")): r["rating"] for r in ratings}
         for f, siblings in display_data:
             item = QListWidgetItem()
             self.list_widget.addItem(item)
@@ -1112,10 +1126,14 @@ class GridSelectorWindow(QMainWindow):
             if siblings:
                 widget.set_paired(True) # Green border on thumbnail
             
-            # Apply rating if available
-            if f.name in rating_map:
-                widget.set_rating(rating_map[f.name])
-
+            # Apply rating if available (path-keyed to avoid filename collisions)
+            if self.rating_manager:
+                rating_key = self.rating_manager.key_for_path(f)
+                rating_val = rating_map.get(rating_key)
+                if rating_val is None:
+                    rating_val = rating_map.get(f.name)
+                if rating_val is not None:
+                    widget.set_rating(rating_val)
             item.setSizeHint(widget.sizeHint())
             self.list_widget.setItemWidget(item, widget)
             item.setData(Qt.UserRole, str(f))
@@ -1481,40 +1499,38 @@ class GridSelectorWindow(QMainWindow):
             dest_root = self.target_folder1
         else:
             dest_root = self.target_folder2
-        
+
         if not dest_root:
             QMessageBox.warning(self, "Warning", f"Target{target_idx} is not set.")
             return
 
         items = self.list_widget.selectedItems()
-        if not items: return
-        
+        if not items:
+            return
+
         # Sibling Pairing Logic
         primary_files = []
         hidden_siblings = []
         for item in items:
             primary_files.append(Path(item.data(Qt.UserRole)))
-            # Get hidden siblings from data
             sibs = item.data(Qt.UserRole + 1)
             if sibs:
                 hidden_siblings.extend([Path(s) for s in sibs])
-        
+
         all_files_to_move = set(primary_files)
-        
-        # Add explicitly tracked siblings (from fuzzy grouping)
         all_files_to_move.update(hidden_siblings)
 
-        # XMP/Sidecar detection for ALL primary files
+        # XMP/Sidecar detection for all files already included
         files_to_scan = list(all_files_to_move)
         for p in files_to_scan:
-             parent = p.parent
-             stem = p.stem
-             try:
-                 for cand in parent.glob(f"{stem}*"):
-                     if cand.suffix.lower() in ['.xmp', '.xml'] and cand not in all_files_to_move:
-                         all_files_to_move.add(cand)
-             except Exception:
-                 pass
+            parent = p.parent
+            stem = p.stem
+            try:
+                for cand in parent.glob(f"{stem}*"):
+                    if cand.suffix.lower() in ['.xmp', '.xml'] and cand not in all_files_to_move:
+                        all_files_to_move.add(cand)
+            except Exception:
+                pass
 
         # If not in pair mode, also detect associated files (e.g. RAW+JPG with same stem)
         if not self.pair_mode_enabled:
@@ -1525,69 +1541,42 @@ class GridSelectorWindow(QMainWindow):
                 try:
                     for cand in parent.glob(f"{stem}.*"):
                         if cand != p and cand not in all_files_to_move:
-                             siblings_found.append(cand)
+                            siblings_found.append(cand)
                 except Exception:
                     pass
-            
+
             if siblings_found:
-                 msg = f"Found {len(siblings_found)} associated files (e.g. RAW/JPG pairs).\nMove them together?"
-                 ret = QMessageBox.question(self, "Associated Files", msg, QMessageBox.Yes | QMessageBox.No)
-                 if ret == QMessageBox.Yes:
-                     all_files_to_move.update(siblings_found)
+                msg = f"Found {len(siblings_found)} associated files (e.g. RAW/JPG pairs).\nMove them together?"
+                ret = QMessageBox.question(self, "Associated Files", msg, QMessageBox.Yes | QMessageBox.No)
+                if ret == QMessageBox.Yes:
+                    all_files_to_move.update(siblings_found)
 
-        # Prepare operations
+        # Prepare operations (final collision handling is done in FileOperationWorker)
         ops = []
-        recorded_moves = [] # For Undo Stack (dest, src)
-        
-        for src in all_files_to_move:
-            dest = dest_root / src.name
-            
-            # Smart Rename to avoid overwrite (just prepares the path)
-            # The worker also has a check, but we do it here to know the final dest for undo stack
-            if dest.exists():
-                 base = dest.stem
-                 ext = dest.suffix
-                 i = 1
-                 while dest.exists(): # Simple check
-                     dest = dest_root / f"{base}_copy{i}{ext}"
-                     i += 1
-            
-            ops.append((src, dest))
-            recorded_moves.append((dest, src))
+        for src in sorted(all_files_to_move, key=lambda p: str(p).lower()):
+            ops.append((src, dest_root / src.name))
 
-        if ops:
-            # OPTIMISTIC UI UPDATE: Remove items immediately
-            # We must iterate safely as we modify the list
-            # Map paths to items for quick removal
-            # Warning: siblings are hidden, so we only remove visible items that match
-            
-            # 1. Identify all paths being moved
-            paths_being_moved = {str(src) for src, _ in ops}
-            
-            # 2. Iterate list and remove items
-            # We walk backwards to avoid index issues
-            rows_to_remove = []
-            for i in range(self.list_widget.count()):
-                item = self.list_widget.item(i)
-                item_path = item.data(Qt.UserRole)
-                if item_path in paths_being_moved:
-                    rows_to_remove.append(i)
-            
-            # Remove in reverse order
-            for r in sorted(rows_to_remove, reverse=True):
-                self.list_widget.takeItem(r)
+        if not ops:
+            return
 
-            # Rebuild _path_to_row index after removals
-            self._path_to_row.clear()
-            for i in range(self.list_widget.count()):
-                item = self.list_widget.item(i)
-                self._path_to_row[item.data(Qt.UserRole)] = i
+        def _on_finished(success_ops, errors):
+            if success_ops:
+                recorded_moves = [(dest, src) for src, dest in success_ops]
+                self.undo_stack.append(recorded_moves)
+                self.redo_stack.clear()
 
-            # Update Undo Stack
-            self.undo_stack.append(recorded_moves)
-            
-            # Start Background Operation
-            self._start_file_operation(ops, 'move')
+            if self.current_folder:
+                self.load_folder_grid(self.current_folder)
+
+            if errors:
+                self.statusBar().showMessage(
+                    f"Moved {len(success_ops)} files, {len(errors)} failed.",
+                    4000,
+                )
+            else:
+                self.statusBar().showMessage(f"Moved {len(success_ops)} files.", 2500)
+
+        self._start_file_operation(ops, 'move', on_finished=_on_finished)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1630,37 +1619,38 @@ class GridSelectorWindow(QMainWindow):
         else:
             super().keyPressEvent(event)
 
-    def _start_file_operation(self, ops, op_type, is_undo=False):
+    def _start_file_operation(self, ops, op_type, on_finished=None):
         # Create new Thread and Worker
-        thread = QThread(self) # Parented to self to ensure life
+        thread = QThread(self)
         worker = FileOperationWorker(ops, op_type)
         worker.moveToThread(thread)
-        
+
         # Track them to avoid GC
-        op_id = object() # unique tag
         self.active_file_ops.append((thread, worker))
-        
-        # Cleanup callback
-        def cleanup():
-            if thread.isRunning(): thread.quit()
-            if worker: worker.deleteLater()
-            if thread: thread.deleteLater()
-            # Remove from list
+
+        result_holder = {"success": [], "errors": []}
+
+        def _collect_result(success_ops, errors):
+            result_holder["success"] = success_ops
+            result_holder["errors"] = errors
+
+        def _cleanup():
+            thread.deleteLater()
             for i, (t, w) in enumerate(self.active_file_ops):
                 if t is thread:
                     self.active_file_ops.pop(i)
                     break
-        
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(cleanup)
-        # worker.finished.connect(self._on_file_op_finished) # No-op currently
-        
-        worker.error.connect(lambda e: print(f"File Op Error: {e}"))
-        
-        if is_undo:
-             worker.finished.connect(lambda: self.load_folder_grid(self.current_folder))
 
+        thread.started.connect(worker.run)
+        worker.finished.connect(_collect_result)
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(lambda e: print(f"File Op Error: {e}"))
+
+        if on_finished:
+            thread.finished.connect(lambda: on_finished(result_holder["success"], result_holder["errors"]))
+
+        thread.finished.connect(_cleanup)
         thread.start()
 
     def move_item_to_target(self, item, target_idx):
@@ -1671,8 +1661,8 @@ class GridSelectorWindow(QMainWindow):
         # Updated Help Text
         if self.language == 'en':
             text = (
-                "※ Program Usage Guide\n\n"
-                "■ Mode: Image Grid (Default)\n"
+                "[Program Usage Guide]\n\n"
+                "[Mode] Image Grid (Default)\n"
                 "- Left Panel: Shows thumbnails of images in the selected folder.\n"
                 "- Right Panel: Shows two preview slots (Slot 1 & Slot 2).\n"
                 "- Click a thumbnail to view in Slot 1.\n"
@@ -1680,14 +1670,14 @@ class GridSelectorWindow(QMainWindow):
                 "- Use 'Dual Mode' to detach the right panel into a separate window.\n"
                 "- Use 'Independent Zoom' to toggle linked zooming between slots.\n"
                 "- Drag and Drop images to Target1/Target2 labels at bottom right.\n\n"
-                "■ Mode: Organize Photos\n"
+                "[Mode] Organize Photos\n"
                 "- Click 'Organize Photos' to switch to this mode.\n"
                 "- Left Panel: Settings for sorting (Source, Destination, Grouping, Action).\n"
                 "- Slot 1 (Top Right): Shows the preview tree of how files will be organized.\n"
                 "- Slot 2 (Bottom Right): Shows execution logs and progress.\n"
                 "- Click 'Scan' to analyze files, then 'Start' to execute the move/copy.\n"
                 "- Navigating to 'Image Folder' or 'Targets' will automatically exit this mode.\n\n"
-                "■ Shortcuts\n"
+                "[Shortcuts]\n"
                 "- 1 / 2 + Click: Move to Target 1 / 2\n"
                 "- Ctrl+Z: Undo Move\n"
                 "- Ctrl+Y: Redo Move\n"
@@ -1696,23 +1686,23 @@ class GridSelectorWindow(QMainWindow):
             )
         else:
             text = (
-                "※ 프로그램 사용 안내\n\n"
-                "■ 모드: 이미지 그리드 (기본)\n"
-                "- 왼쪽 패널: 선택된 폴더의 이미지 썸네일을 표시합니다.\n"
+                "[프로그램 사용 안내]\n\n"
+                "[모드] 이미지 그리드 (기본)\n"
+                "- 왼쪽 패널: 선택한 폴더의 이미지 썸네일을 표시합니다.\n"
                 "- 오른쪽 패널: 두 개의 프리뷰 슬롯(Slot 1, Slot 2)을 보여줍니다.\n"
                 "- 썸네일 클릭: Slot 1 상단 프리뷰에 표시\n"
                 "- Ctrl + 클릭: Slot 2 하단 프리뷰에 표시\n"
                 "- '듀얼 모드' 버튼으로 오른쪽 패널을 별도 창으로 분리할 수 있습니다.\n"
                 "- '독립 줌 모드'로 두 슬롯의 줌 연결을 켜고 끌 수 있습니다.\n"
-                "- 우측 하단의 Target1/Target2 라벨로 이미지를 드래그하여 이동할 수 있습니다.\n\n"
-                "■ 모드: 사진 정리 (Organize Photos)\n"
+                "- 우측 하단 Target1/Target2 라벨로 이미지를 드래그하여 이동할 수 있습니다.\n\n"
+                "[모드] 사진 정리 (Organize Photos)\n"
                 "- '사진 정리' 버튼을 누르면 정리 모드로 전환됩니다.\n"
-                "- 왼쪽 패널: 분류 설정 (원본/대상 폴더, 그룹 방식, 이동/복사 등).\n"
+                "- 왼쪽 패널: 분류 설정(원본/대상 폴더, 그룹 방식, 이동/복사 등).\n"
                 "- Slot 1 (우측 상단): 스캔 후 파일이 어떻게 정리될지 트리 구조로 미리 보여줍니다.\n"
                 "- Slot 2 (우측 하단): 실행 로그와 진행률을 표시합니다.\n"
-                "- 'Scan'을 눌러 분석 후, 'Start'를 눌러 실행하세요.\n"
+                "- 'Scan'으로 분석 후, 'Start'를 눌러 실행하세요.\n"
                 "- 'Image Folder'나 타겟 폴더 버튼을 누르면 자동으로 정리 모드가 종료됩니다.\n\n"
-                "■ 단축키\n"
+                "[단축키]\n"
                 "- 1 / 2 + 클릭: Target 1 / 2 로 이동\n"
                 "- Ctrl+Z: 이동 취소 (Undo)\n"
                 "- Ctrl+Y: 다시 실행 (Redo)\n"
@@ -1752,7 +1742,7 @@ class GridSelectorWindow(QMainWindow):
             self.viewer_mode_enabled = True
             
             # Switch view to Viewer
-            self.main_stack.setCurrentIndex(1)
+            self._switch_main_page(1)
             
             # Load current image into viewer
             self._load_viewer_image()
@@ -1764,7 +1754,7 @@ class GridSelectorWindow(QMainWindow):
                 self.btn_viewer_mode.setChecked(False)
             
             self.viewer_widget.clear_view()
-            self.main_stack.setCurrentIndex(0)
+            self._switch_main_page(0)
             
             # Force focus back to list
             self.list_widget.setFocus()
@@ -1784,9 +1774,9 @@ class GridSelectorWindow(QMainWindow):
             if paths:
                 self.exif_widget.load_images(paths)
             
-            self.main_stack.setCurrentIndex(2) # EXIF Editor index
+            self._switch_main_page(2) # EXIF Editor index
         else:
-            self.main_stack.setCurrentIndex(0)
+            self._switch_main_page(0)
             self.list_widget.setFocus()
 
     def toggle_photo_mode(self, checked=False, force_on=False):
@@ -1804,9 +1794,9 @@ class GridSelectorWindow(QMainWindow):
             if paths:
                 self.photo_widget.load_images(paths)
             
-            self.main_stack.setCurrentIndex(3) # Photo Editor index
+            self._switch_main_page(3) # Photo Editor index
         else:
-            self.main_stack.setCurrentIndex(0)
+            self._switch_main_page(0)
             self.list_widget.setFocus()
 
     def _load_viewer_image(self):
@@ -1830,18 +1820,10 @@ class GridSelectorWindow(QMainWindow):
         # For viewer, we want high quality.
         pixmap = self._load_full_res_pixmap(path)
         
-        # Get Rating
+        # Get Rating (O(1) lookup)
         rating = 0
         if self.rating_manager:
-            # We need to fetch rating efficiently.
-            # Ideally RatingManager should cache or we search.
-            # For now load all and find (Optimization point for later)
-            ratings = self.rating_manager.load_ratings()
-            for r in ratings:
-                if r['filename'] == path.name:
-                    rating = r['rating']
-                    break
-                    
+            rating = self.rating_manager.get_rating(path)                    
         total_items = self.list_widget.count()
         current_idx = self.list_widget.currentRow() + 1
         index_str = f"{current_idx} / {total_items}"
@@ -1900,10 +1882,10 @@ class GridSelectorWindow(QMainWindow):
             if not path.exists():
                 continue
 
-            # Toggle logic: same rating again → remove rating
-            existing = self.rating_manager.get_rating(path.name)
+            # Toggle logic: same rating again -> remove rating
+            existing = self.rating_manager.get_rating(path)
             if existing == rating:
-                self.rating_manager.remove_rating(path.name)
+                self.rating_manager.remove_rating(path)
                 widget = self.list_widget.itemWidget(item)
                 if widget:
                     widget.set_rating(0)
@@ -1911,7 +1893,7 @@ class GridSelectorWindow(QMainWindow):
                 print(f"Removed rating for {path.name}")
             else:
                 date_str, camera_str = get_image_metadata(path)
-                self.rating_manager.save_rating(path.name, rating, date_str, camera_str)
+                self.rating_manager.save_rating(path, rating, date_str, camera_str)
                 widget = self.list_widget.itemWidget(item)
                 if widget:
                     widget.set_rating(rating)
@@ -1919,7 +1901,10 @@ class GridSelectorWindow(QMainWindow):
                 print(f"Rated {path.name}: {rating}")
             
         if self.viewer_mode_enabled and self.viewer_widget.isVisible():
-            self.viewer_widget.set_rating(rating)
+            current_items = self.list_widget.selectedItems()
+            if current_items:
+                current_path = Path(str(current_items[0].data(Qt.UserRole)))
+                self.viewer_widget.set_rating(self.rating_manager.get_rating(current_path))
     
         if count > 0:
             self.statusBar().showMessage(f"Updated rating for {count} images.", 2000)
@@ -1947,7 +1932,7 @@ class GridSelectorWindow(QMainWindow):
         if not self.rating_manager:
             QMessageBox.warning(self, "Warning", "No folder selected.")
             return
-            
+
         dlg = FilterDialog(self, self.rating_manager)
         if dlg.exec():
             result = dlg.get_filtered_files()
@@ -1955,8 +1940,8 @@ class GridSelectorWindow(QMainWindow):
                 # Reset / Show All
                 self.reset_filter()
             else:
-                filtered_names = set(result)
-                self.apply_file_filter(filtered_names)
+                filtered_keys = set(result)
+                self.apply_file_filter(filtered_keys)
 
     def reset_filter(self):
         count = self.list_widget.count()
@@ -1965,22 +1950,23 @@ class GridSelectorWindow(QMainWindow):
             item.setHidden(False)
         self.statusBar().showMessage(f"Filter reset. Showing all {count} images.", 3000)
 
-    def apply_file_filter(self, allowed_names: set):
+    def apply_file_filter(self, allowed_keys: set):
         count = self.list_widget.count()
-        hidden_count = 0
         visible_count = 0
-        
-        # If no filter (empty set might mean no matches, or all? verify)
-        # Usually filter dialog returns matches. If 0 matches, show nothing.
-        
+
         for i in range(count):
             item = self.list_widget.item(i)
             path = Path(item.data(Qt.UserRole))
-            if path.name in allowed_names:
+
+            if self.rating_manager:
+                key = self.rating_manager.key_for_path(path)
+            else:
+                key = path.name
+
+            if key in allowed_keys or path.name in allowed_keys:
                 item.setHidden(False)
                 visible_count += 1
             else:
                 item.setHidden(True)
-                hidden_count += 1
-        
+
         self.statusBar().showMessage(f"Filter applied. {visible_count} visible.", 3000)

@@ -1,6 +1,7 @@
-import os
+﻿import os
 import hashlib
 from pathlib import Path
+
 
 def sanitize(name: str) -> str:
     """Sanitize a string so it is safe for use as a folder or file name."""
@@ -8,13 +9,15 @@ def sanitize(name: str) -> str:
         return "Unknown"
     safe_chars = []
     for ch in name.strip():
-        if ch.isalnum() or ch in " ._-()+[]#/":
+        # Keep slash/backslash out to avoid unintended nested folders.
+        if ch.isalnum() or ch in " ._-()+[]#":
             safe_chars.append(ch)
         else:
             safe_chars.append(" ")
     s = " ".join("".join(safe_chars).split())
     trimmed = s[:120] if len(s) > 120 else s
     return trimmed or "Unknown"
+
 
 def unique_dest(dest_dir: Path, name: str) -> Path:
     """Generate a destination file path that will not collide with existing files."""
@@ -25,6 +28,7 @@ def unique_dest(dest_dir: Path, name: str) -> Path:
         cand = dest_dir / f"{base}_{i}{ext}"
         i += 1
     return cand
+
 
 def file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
     """Compute the SHA-1 hash of a file (reads in chunks for efficiency)."""

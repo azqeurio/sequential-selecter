@@ -42,8 +42,7 @@ class ThumbnailWidget(QWidget):
                 border-radius: 4px;
             }
             QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                image: url(); /* Assuming a checkmark is rendered by OS or can be added later */
+                background-color: #2ECC71;
             }
         """)
         self.checkbox.move(10, 10)
@@ -90,7 +89,7 @@ class ThumbnailWidget(QWidget):
         
         # Draw border for paired items
         if self.is_paired:
-            pen = QPen(QColor("#4CAF50"), 2)
+            pen = QPen(QColor("#2ECC71"), 2)
             painter.setPen(pen)
             painter.drawRect(1, 1, self.width()-2, self.height()-2)
             
@@ -159,19 +158,31 @@ class DropLabel(QLabel):
         super().__init__(text, parent)
         self.target_id = target_id
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        self.setStyleSheet(
+            "background: rgba(255, 255, 255, 0.06); color: #d6e4f7; "
+            "border: 1px dashed rgba(160, 190, 230, 0.5); border-radius: 9px;"
+        )
         self.setAcceptDrops(True)
         
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.setStyleSheet("background-color: #4CAF50; color: white; border: 2px dashed #fff; border-radius: 5px;")
+            self.setStyleSheet(
+                "background: rgba(79, 148, 241, 0.28); color: white; "
+                "border: 1px solid rgba(168, 208, 255, 0.95); border-radius: 9px;"
+            )
             
     def dragLeaveEvent(self, event):
-        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        self.setStyleSheet(
+            "background: rgba(255, 255, 255, 0.06); color: #d6e4f7; "
+            "border: 1px dashed rgba(160, 190, 230, 0.5); border-radius: 9px;"
+        )
         
     def dropEvent(self, event):
-        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        self.setStyleSheet(
+            "background: rgba(255, 255, 255, 0.06); color: #d6e4f7; "
+            "border: 1px dashed rgba(160, 190, 230, 0.5); border-radius: 9px;"
+        )
         urls = event.mimeData().urls()
         paths = [url.toLocalFile() for url in urls if url.isLocalFile()]
         if paths:
@@ -195,7 +206,7 @@ class GPUImageWidget(QGraphicsView):
         
         self.setRenderHint(QPainter.Antialiasing)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.setBackgroundBrush(QBrush(QColor("#1e1e1e")))
+        self.setBackgroundBrush(QBrush(QColor("#111111")))
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setFrameShape(QGraphicsView.NoFrame)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
@@ -326,7 +337,7 @@ class ProSliderWidget(QWidget):
         self.edit_val = QLineEdit()
         self.edit_val.setFixedWidth(35)
         self.edit_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.edit_val.setStyleSheet("background: #333; color: white; border: 1px solid #555; border-radius: 2px; font-size: 11px;")
+        self.edit_val.setStyleSheet("background: #111; color: white; border: 1px solid #2ECC71; border-radius: 2px; font-size: 11px;")
         self.edit_val.hide()
         self.edit_val.returnPressed.connect(self._on_edit_finish)
         self.edit_val.editingFinished.connect(self._on_edit_finish)
@@ -475,7 +486,7 @@ class ProSliderWidget(QWidget):
         fill_x = min(zx, hx)
         fill_w = abs(hx - zx)
         if fill_w > 0:
-            painter.setBrush(QColor("#4CAF50"))
+            painter.setBrush(QColor("#2ECC71"))
             painter.drawRoundedRect(int(fill_x), int(cy - 2), int(fill_w), 4, 2, 2)
             
         painter.setBrush(QColor("#777777"))

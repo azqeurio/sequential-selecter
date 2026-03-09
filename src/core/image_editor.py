@@ -22,6 +22,61 @@ class PhotoEditor:
         if rotate_val != 0:
             img = img.rotate(-rotate_val, resample=Image.BICUBIC, expand=True)
 
+        lens_dist = params.get('lens_distortion', 0) / 100.0
+        pers_h = params.get('pers_h', 0) / 100.0
+        pers_v = params.get('pers_v', 0) / 100.0
+        
+        if lens_dist != 0 or pers_h != 0 or pers_v != 0:
+            try:
+                import cv2
+                cv_img = np.array(img)
+                h, w = cv_img.shape[:2]
+                
+                if lens_dist != 0:
+                    f = max(w, h)
+                    cx, cy = w / 2.0, h / 2.0
+                    camera_matrix = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]], dtype=np.float32)
+                    
+                    k1 = lens_dist * 0.2
+                    dist_coeffs = np.array([k1, 0, 0, 0, 0], dtype=np.float32)
+                    new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1, (w,h))
+                    cv_img = cv2.undistort(cv_img, camera_matrix, dist_coeffs, None, new_camera_matrix)
+                    
+                    x, y, w_roi, h_roi = roi
+                    if w_roi > 0 and h_roi > 0:
+                        cv_img = cv_img[y:y+h_roi, x:x+w_roi]
+                        h, w = cv_img.shape[:2]
+                
+                if pers_h != 0 or pers_v != 0:
+                    pts1 = np.float32([[0, 0], [w, 0], [0, h], [w, h]])
+                    
+                    offset_x = (w * 0.4) * abs(pers_v)
+                    offset_y = (h * 0.4) * abs(pers_h)
+                    
+                    if pers_v > 0:
+                        pts2 = np.float32([[offset_x, 0], [w - offset_x, 0], [0, h], [w, h]])
+                    elif pers_v < 0:
+                        pts2 = np.float32([[0, 0], [w, 0], [offset_x, h], [w - offset_x, h]])
+                    else:
+                        pts2 = np.float32([[0, 0], [w, 0], [0, h], [w, h]])
+                        
+                    if pers_h > 0:
+                        pts2[0][1] += offset_y
+                        pts2[2][1] -= offset_y
+                    elif pers_h < 0:
+                        pts2[1][1] += offset_y
+                        pts2[3][1] -= offset_y
+                        
+                    matrix = cv2.getPerspectiveTransform(pts1, pts2)
+                    cv_img = cv2.warpPerspective(cv_img, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+                
+                if cv_img.shape[0] > 0 and cv_img.shape[1] > 0:
+                    img = Image.fromarray(cv_img)
+                    
+            except Exception as e:
+                import traceback
+                print(f"Geometry error: {e}\\n{traceback.format_exc()}")
+
         c_top = params.get('crop_top', 0) / 100.0
         c_bot = params.get('crop_bottom', 0) / 100.0
         c_left = params.get('crop_left', 0) / 100.0
@@ -185,15 +240,17 @@ class PhotoEditor:
                 # Convert to uint8 for NLMeans
                 arr_u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
                 denoised = cv2.fastNlMeansDenoisingColored(
-                    arr_u8, None, 
-                    h=h_strength, 
-                    hForColorComponents=h_strength,
-                    templateWindowSize=7,
-                    searchWindowSize=21
+                    arr_u8,
+                    None,
+                    h_strength,
+                    h_strength,
+                    7,
+                    21,
                 )
                 arr = denoised.astype(np.float32) / 255.0
-            except ImportError:
-                pass  # OpenCV not available, skip
+            except Exception:
+                # OpenCV unavailable or build/signature mismatch: skip NR.
+                pass
 
         # Base clamp before moving back to PIL
         arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)

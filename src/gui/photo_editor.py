@@ -1,13 +1,18 @@
 import json
+import os
 from pathlib import Path
 from PIL import Image
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QFrame,
     QProgressBar, QScrollArea, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QCheckBox, QListWidget, QListWidgetItem, QGraphicsItem, QGraphicsPathItem
+    QCheckBox, QListWidget, QListWidgetItem, QGraphicsItem, QGraphicsPathItem,
+    QGraphicsOpacityEffect, QComboBox
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QTimer, QThread
+from PySide6.QtCore import (
+    Qt, Signal, QRectF, QPointF, QSize, QTimer, QThread,
+    QEasingCurve, QPropertyAnimation
+)
 from PySide6.QtGui import QPixmap, QImage, QColor, QPen, QBrush, QPainter, QIcon, QPainterPath, QKeySequence
 
 from ..core.image_loader import load_pil_image
@@ -292,6 +297,12 @@ class RenderWorker(QThread):
             except Exception as e:
                 print(f"RenderWorker error: {e}")
 
+class DiagnosticsWorker(QThread):
+    finished_diag = Signal(dict)
+    
+    def run(self):
+        diag = DenoiseWorker.get_torch_diagnostics()
+        self.finished_diag.emit(diag)
 
 class DenoiseWorker(QThread):
     """Background worker for AI noise reduction.
@@ -301,7 +312,9 @@ class DenoiseWorker(QThread):
     progress = Signal(int)       # 0-100
     status = Signal(str)         # Status text
     finished_ok = Signal(object, object, str)  # full_img, proxy_img, method_name
+    finished_cancel = Signal(str)  # cancellation reason
     finished_err = Signal(str)   # error message
+    CANCELLED_TOKEN = "__SSC_DENOISE_CANCELLED__"
     
     # SCUNet first (pure denoiser = fastest), then upscale-based fallbacks
     MODELS = {
@@ -321,39 +334,188 @@ class DenoiseWorker(QThread):
             'name': 'Real-ESRGAN',
         },
     }
-    MODEL_ORDER = ['scunet', 'swin2sr', 'realesrgan']
+    MODEL_ORDER = ['swin2sr', 'scunet', 'realesrgan']
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.full_img = None
         self.proxy_img = None
-    
-    def setup(self, full_pil, proxy_pil):
+        self._cancel_requested = False
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.full_img = None
+        self.proxy_img = None
+        self.model_key = 'swin2sr'
+        self._cancel_requested = False
+
+    def setup(self, full_pil, proxy_pil, model_key):
         self.full_img = full_pil
         self.proxy_img = proxy_pil
-    
+        self.model_key = model_key
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+        self.requestInterruption()
+
+    def _is_cancel_requested(self):
+        return self._cancel_requested or self.isInterruptionRequested()
+
+    def _check_cancel(self):
+        if self._is_cancel_requested():
+            raise RuntimeError(self.CANCELLED_TOKEN)
+
     @staticmethod
-    def _get_device():
+    def get_torch_diagnostics():
+        """Return environment diagnostics for AI denoise backend."""
+        import subprocess
+
+        info = {
+            "torch_installed": False,
+            "torch_version": "",
+            "torch_cuda_build": "",
+            "cuda_available": False,
+            "cuda_device_count": 0,
+            "cuda_devices": [],
+            "mps_available": False,
+            "nvidia_smi_available": False,
+            "nvidia_smi_output": "",
+            "error": "",
+            "cuda_unavailable_reason": "",
+        }
+
+        try:
+            probe = subprocess.run(
+                ["nvidia-smi", "-L"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if probe.returncode == 0:
+                info["nvidia_smi_available"] = True
+                info["nvidia_smi_output"] = (probe.stdout or "").strip()
+            else:
+                info["nvidia_smi_output"] = (probe.stderr or "").strip()
+        except Exception:
+            info["nvidia_smi_output"] = "nvidia-smi not found"
+
+        try:
+            import torch
+
+            info["torch_installed"] = True
+            info["torch_version"] = str(torch.__version__)
+            info["torch_cuda_build"] = str(torch.version.cuda or "")
+            info["cuda_available"] = bool(torch.cuda.is_available())
+
+            try:
+                info["cuda_device_count"] = int(torch.cuda.device_count())
+            except Exception:
+                info["cuda_device_count"] = 0
+
+            devices = []
+            for idx in range(info["cuda_device_count"]):
+                try:
+                    devices.append(torch.cuda.get_device_name(idx))
+                except Exception:
+                    devices.append(f"GPU {idx}")
+            info["cuda_devices"] = devices
+
+            try:
+                info["mps_available"] = bool(
+                    hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                )
+            except Exception:
+                info["mps_available"] = False
+
+            if not info["cuda_available"]:
+                if not info["torch_cuda_build"]:
+                    info["cuda_unavailable_reason"] = "PyTorch CPU build detected"
+                elif info["cuda_device_count"] == 0:
+                    info["cuda_unavailable_reason"] = "No CUDA device detected by PyTorch"
+                else:
+                    info["cuda_unavailable_reason"] = "CUDA runtime unavailable in current environment"
+        except Exception as e:
+            info["error"] = str(e)
+            if not info["cuda_unavailable_reason"]:
+                info["cuda_unavailable_reason"] = "PyTorch import failed"
+
+        return info
+
+    @classmethod
+    def _get_device(cls):
         """Detect best available device: CUDA > MPS > CPU."""
         import torch
+
+        forced = os.environ.get("SSC_DENOISE_DEVICE", "").strip().lower()
+        diag = cls.get_torch_diagnostics()
+
+        if forced in ("cuda", "gpu"):
+            if torch.cuda.is_available():
+                return torch.device("cuda"), f" [CUDA: {torch.cuda.get_device_name(0)}]"
+            reason = diag.get("cuda_unavailable_reason", "CUDA unavailable")
+            return torch.device("cpu"), f" [CPU forced fallback: {reason}]"
+
+        if forced == "mps":
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return torch.device("mps"), " [MPS: Apple Silicon]"
+            return torch.device("cpu"), " [CPU forced fallback: MPS unavailable]"
+
+        if forced == "cpu":
+            return torch.device("cpu"), " [CPU: forced]"
+
         if torch.cuda.is_available():
-            return torch.device('cuda'), f" [CUDA: {torch.cuda.get_device_name(0)}]"
-        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return torch.device('mps'), " [MPS: Apple Silicon]"
-        return torch.device('cpu'), " [CPU]"
+            return torch.device("cuda"), f" [CUDA: {torch.cuda.get_device_name(0)}]"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps"), " [MPS: Apple Silicon]"
+
+        reason = diag.get("cuda_unavailable_reason", "").strip()
+        if reason:
+            return torch.device("cpu"), f" [CPU: {reason}]"
+        return torch.device("cpu"), " [CPU]"
     
     def _ensure_model(self, key):
         """Download model if not present, return path."""
-        import urllib.request
         model_dir = Path.home() / ".ssc_models"
         model_dir.mkdir(exist_ok=True)
         info = self.MODELS[key]
         path = model_dir / info['file']
+        self._check_cancel()
         if not path.exists():
             self.status.emit(f"{info['name']}: Downloading weights...")
             self.progress.emit(10)
-            urllib.request.urlretrieve(info['url'], str(path))
+            self._download_with_cancel(info["url"], path)
         return path
+
+    def _download_with_cancel(self, url, destination):
+        """Chunked download so cancel requests can stop promptly."""
+        import urllib.request
+
+        temp_path = destination.with_suffix(destination.suffix + ".part")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ssc-ai-denoise/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as response, open(temp_path, "wb") as out:
+                total = int(response.headers.get("Content-Length", 0))
+                read = 0
+                while True:
+                    self._check_cancel()
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    read += len(chunk)
+                    if total > 0:
+                        pct = 10 + min(8, int((read / total) * 8))
+                        self.progress.emit(pct)
+            temp_path.replace(destination)
+        except Exception:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            raise
     
     def _denoise_with_spandrel(self, model_key, full_cv, dev_info):
         """Run inference on FULL image only, derive proxy by downscale.
@@ -362,18 +524,21 @@ class DenoiseWorker(QThread):
         import torch
         import spandrel
         import numpy as np
+        self._check_cancel()
         
         info = self.MODELS[model_key]
         model_name = info['name']
         
         self.status.emit(f"{model_name}: Loading model...{dev_info}")
         self.progress.emit(15)
-        
+
         weight_path = self._ensure_model(model_key)
+        self._check_cancel()
         device, _ = self._get_device()
         use_cuda = device.type == 'cuda'
         
         model_desc = spandrel.ModelLoader().load_from_file(str(weight_path))
+        self._check_cancel()
         
         # FP16: CUDA only (MPS doesn't support it well)
         use_half = False
@@ -409,21 +574,41 @@ class DenoiseWorker(QThread):
         if use_half:
             img_t = img_t.half()
         
-        if h > tile_size * 1.2 or w > tile_size * 1.2:
+        # Swin2SR & Real-ESRGAN are 4x upscalers! 20MP -> 80MP is too heavy for 12GB VRAM.
+        # Downsample the input to 5MP first so it outputs 20MP, keeping inference around ~20 seconds.
+        if is_upscale:
+            in_h, in_w = h // scale, w // scale
+            import cv2
+            img_f_scaled = cv2.resize(img_f, (in_w, in_h), interpolation=cv2.INTER_AREA)
+            img_t = torch.from_numpy(img_f_scaled).permute(2, 0, 1).unsqueeze(0).to(device)
+            if use_half:
+                img_t = img_t.half()
+            
+            # Use very large tiles because a 5MP image easily fits in 12GB FP16 (often doesn't even need tiling)
+            tile_size = 1024
+            proc_h, proc_w = in_h, in_w
+        else:
+            proc_h, proc_w = h, w
+
+        if proc_h > tile_size * 1.2 or proc_w > tile_size * 1.2:
             result = self._tiled_inference(model_desc, img_t, tile_size, device, use_half, scale)
         else:
-            pad_h = (8 - h % 8) % 8
-            pad_w = (8 - w % 8) % 8
+            self._check_cancel()
+            pad_h = (8 - proc_h % 8) % 8
+            pad_w = (8 - proc_w % 8) % 8
             if pad_h > 0 or pad_w > 0:
                 img_t = torch.nn.functional.pad(img_t, (0, pad_w, 0, pad_h), mode='reflect')
             with torch.no_grad():
                 if use_cuda and use_half:
                     with torch.amp.autocast('cuda'):
+                        self._check_cancel()
                         result = model_desc(img_t)
                 else:
+                    self._check_cancel()
                     result = model_desc(img_t)
-            result = result[:, :, :h*scale, :w*scale]
-        
+            result = result[:, :, :proc_h*scale, :proc_w*scale]
+
+        self._check_cancel()
         out_np = result.float().squeeze(0).permute(1, 2, 0).cpu().numpy()
         out_np = np.clip(out_np * 255, 0, 255).astype(np.uint8)
         
@@ -442,6 +627,7 @@ class DenoiseWorker(QThread):
         ratio = proxy_h / h
         proxy_w = int(w * ratio)
         proxy_cv = cv2.resize(out_np, (proxy_w, proxy_h), interpolation=cv2.INTER_AREA)
+        self._check_cancel()
         
         del model_desc
         if use_cuda:
@@ -471,6 +657,7 @@ class DenoiseWorker(QThread):
         
         for y in tiles_y:
             for x in tiles_x:
+                self._check_cancel()
                 tile_idx += 1
                 y_end = min(y + tile_size, h)
                 x_end = min(x + tile_size, w)
@@ -485,8 +672,10 @@ class DenoiseWorker(QThread):
                 with torch.no_grad():
                     if use_half and device.type == 'cuda':
                         with torch.amp.autocast('cuda'):
+                            self._check_cancel()
                             tile_out = model(tile)
                     else:
+                        self._check_cancel()
                         tile_out = model(tile)
                 
                 tile_out = tile_out[:, :, :th*scale, :tw*scale].float().cpu()
@@ -494,7 +683,7 @@ class DenoiseWorker(QThread):
                 weight_map[:, :, y*scale:y_end*scale, x*scale:x_end*scale] += 1
                 
                 del tile, tile_out
-                if device.type == 'cuda':
+                if device.type == 'cuda' and tile_idx % 4 == 0:
                     torch.cuda.empty_cache()
                 
                 pct = 20 + int((tile_idx / total_tiles) * 65)
@@ -508,49 +697,57 @@ class DenoiseWorker(QThread):
     def run(self):
         import numpy as np
         try:
+            self._check_cancel()
             full_cv = np.array(self.full_img.convert('RGB'))
             
             # Detect device
             dev_info = " [CPU]"
+            diag = {}
             try:
                 _, dev_info = self._get_device()
+                diag = self.get_torch_diagnostics()
             except Exception:
                 pass
+
+            if diag:
+                cuda_build = diag.get("torch_cuda_build", "") or "none"
+                self.status.emit(
+                    f"Backend: torch {diag.get('torch_version', 'n/a')} | "
+                    f"build cuda={cuda_build} | active{dev_info}"
+                )
             
             method_used = None
             result_full = None
             result_proxy = None
             
-            # Try spandrel (SCUNet > Swin2SR > Real-ESRGAN)
+            # Try spandrel with selected model
             try:
-                import torch
-                import spandrel
+                import torch  # noqa: F401
+                import spandrel  # noqa: F401
                 
-                for model_key in self.MODEL_ORDER:
-                    if method_used:
-                        break
-                    try:
-                        self.status.emit(f"Trying {self.MODELS[model_key]['name']}...")
-                        result_full, result_proxy, method_used = self._denoise_with_spandrel(
-                            model_key, full_cv, dev_info)
-                    except Exception as e:
-                        import traceback
-                        print(f"[AI Denoise] {self.MODELS[model_key]['name']} failed: {e}")
-                        traceback.print_exc()
-                        self.status.emit(f"{self.MODELS[model_key]['name']} skipped")
-                        self.progress.emit(8)
-                        continue
-            except ImportError as e:
-                self.status.emit(f"spandrel not available")
+                self._check_cancel()
+                try:
+                    self.status.emit(f"Trying {self.MODELS[self.model_key]['name']}...")
+                    result_full, result_proxy, method_used = self._denoise_with_spandrel(
+                        self.model_key, full_cv, dev_info)
+                except Exception as e:
+                    if str(e) == self.CANCELLED_TOKEN:
+                        raise
+                    import traceback
+                    print(f"[AI Denoise] {self.MODELS[self.model_key]['name']} failed: {e}")
+                    traceback.print_exc()
+                    
+            except ImportError:
+                self.status.emit("spandrel/torch not available, using fallback")
             
             # Fallback: NLMeans+
             if method_used is None:
+                self._check_cancel()
                 try:
                     import cv2
                     self.status.emit("NLMeans+: Processing...")
                     self.progress.emit(20)
-                    d = cv2.fastNlMeansDenoisingColored(full_cv, None, h=12, hForColorComponents=12,
-                                                        templateWindowSize=7, searchWindowSize=21)
+                    d = cv2.fastNlMeansDenoisingColored(full_cv, None, 12, 12, 7, 21)
                     result_full = cv2.edgePreservingFilter(d, flags=2, sigma_s=40, sigma_r=0.35)
                     self.progress.emit(85)
                     h, w = result_full.shape[:2]
@@ -564,13 +761,28 @@ class DenoiseWorker(QThread):
                         "AI Denoise requires:\npip install torch spandrel\n\n"
                         "Or at minimum: pip install opencv-python")
                     return
+                except Exception as e:
+                    # Keep UI responsive even if OpenCV denoise/op filter fails.
+                    self.status.emit(f"NLMeans+ skipped: {e}")
+                    result_full = full_cv
+                    h, w = result_full.shape[:2]
+                    ph = min(h, 2000)
+                    pw = int(w * (ph / h))
+                    result_proxy = cv2.resize(result_full, (pw, ph), interpolation=cv2.INTER_AREA)
+                    method_used = "Original"
             
+            self._check_cancel()
             self.status.emit(f"{method_used}: Applying...")
             self.progress.emit(95)
             full_pil = Image.fromarray(result_full)
             proxy_pil = Image.fromarray(result_proxy)
             self.finished_ok.emit(full_pil, proxy_pil, method_used)
             
+        except RuntimeError as e:
+            if str(e) == self.CANCELLED_TOKEN:
+                self.finished_cancel.emit("Cancelled by user")
+                return
+            self.finished_err.emit(str(e))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -582,34 +794,93 @@ class SetupWorker(QThread):
     progress = Signal(int)
     status = Signal(str)
     finished = Signal(bool, str)  # success, message
+
+    @staticmethod
+    def _run_pip_install(args):
+        import subprocess
+        import sys
+
+        cmd = [sys.executable, "-m", "pip", "install"] + args
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
     
     def run(self):
-        import subprocess, sys, urllib.request
+        import urllib.request
+
         results = []
-        
-        # Step 1: Install torch
+        torch_changed = False
+
+        # Step 1: Ensure torch + CUDA when possible
+        self.status.emit("Checking AI backend (PyTorch/CUDA)...")
+        self.progress.emit(5)
+        diag_before = DenoiseWorker.get_torch_diagnostics()
+        if diag_before.get("nvidia_smi_available"):
+            results.append("nvidia-smi: NVIDIA GPU detected")
+        else:
+            results.append("nvidia-smi: not detected")
+
         try:
-            import torch
-            gpu = f" (CUDA: {torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else " (CPU)"
-            self.status.emit(f"PyTorch {torch.__version__}{gpu} OK")
-            results.append(f"torch: {torch.__version__}{gpu}")
-        except ImportError:
-            self.status.emit("Installing PyTorch (may take several minutes)...")
-            self.progress.emit(5)
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", 
-                    "torch", "torchvision", "--index-url", 
-                    "https://download.pytorch.org/whl/cu121"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                results.append("torch: Installed (CUDA 12.1)")
-            except Exception:
-                try:
-                    subprocess.check_call([sys.executable, "-m", "pip", "install", 
-                        "torch", "torchvision"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                    results.append("torch: Installed (CPU)")
-                except Exception as e:
-                    results.append(f"torch: FAILED ({e})")
+            needs_torch = not diag_before.get("torch_installed")
+            needs_cuda_upgrade = (
+                diag_before.get("torch_installed")
+                and not diag_before.get("cuda_available")
+                and (diag_before.get("nvidia_smi_available") or os.name == "nt")
+            )
+
+            if needs_torch or needs_cuda_upgrade:
+                if needs_cuda_upgrade:
+                    self.status.emit("CUDA GPU detected. Reinstalling CUDA-enabled PyTorch...")
+                else:
+                    self.status.emit("Installing CUDA-enabled PyTorch (may take several minutes)...")
+                torch_changed = True
+
+                self._run_pip_install([
+                    "--upgrade",
+                    "--force-reinstall",
+                    "torch",
+                    "torchvision",
+                    "--index-url",
+                    "https://download.pytorch.org/whl/cu121",
+                ])
+
+            diag_after = DenoiseWorker.get_torch_diagnostics()
+            if diag_after.get("torch_installed") and diag_after.get("cuda_available"):
+                gpu_name = (
+                    diag_after.get("cuda_devices", ["CUDA GPU"])[0]
+                    if diag_after.get("cuda_devices") else "CUDA GPU"
+                )
+                results.append(
+                    f"torch: {diag_after.get('torch_version')} (CUDA OK: {gpu_name})"
+                )
+                self.status.emit(f"PyTorch CUDA ready ({gpu_name})")
+            elif diag_after.get("torch_installed"):
+                reason = diag_after.get("cuda_unavailable_reason", "CUDA unavailable")
+                results.append(
+                    f"torch: {diag_after.get('torch_version')} (CPU mode, {reason})"
+                )
+                if diag_after.get("nvidia_smi_available"):
+                    results.append(
+                        "hint: reinstall CUDA wheel -> "
+                        "pip install --upgrade --force-reinstall torch torchvision "
+                        "--index-url https://download.pytorch.org/whl/cu121"
+                    )
+                self.status.emit(f"PyTorch ready in CPU mode ({reason})")
+            else:
+                # Fallback: at least ensure CPU torch exists
+                self.status.emit("CUDA install failed. Installing CPU PyTorch fallback...")
+                torch_changed = True
+                self._run_pip_install(["--upgrade", "torch", "torchvision"])
+                diag_cpu = DenoiseWorker.get_torch_diagnostics()
+                if diag_cpu.get("torch_installed"):
+                    results.append(f"torch: {diag_cpu.get('torch_version')} (CPU)")
+                else:
+                    results.append("torch: FAILED (install did not complete)")
+        except Exception as e:
+            results.append(f"torch: FAILED ({e})")
         self.progress.emit(30)
         
         # Step 2: Install spandrel (lightweight model loader)
@@ -621,8 +892,7 @@ class SetupWorker(QThread):
             self.status.emit("Installing spandrel...")
             self.progress.emit(35)
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "spandrel"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._run_pip_install(["--upgrade", "spandrel"])
                 results.append("spandrel: Installed")
             except Exception as e:
                 results.append(f"spandrel: FAILED ({e})")
@@ -661,6 +931,8 @@ class SetupWorker(QThread):
             self.progress.emit(pct + 10)
         
         self.progress.emit(100)
+        if torch_changed:
+            results.append("note: restart app to load updated PyTorch binaries")
         summary = "\n".join(results)
         all_ok = all("FAILED" not in r for r in results)
         self.finished.emit(all_ok, summary)
@@ -675,6 +947,14 @@ class ZoomableGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._is_user_zoomed and self.scene():
+            items = self.scene().items()
+            if items:
+                self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
 
     def wheelEvent(self, event):
         # Zoom with Ctrl+Wheel or plain Wheel (no modifier needed for editor)
@@ -711,7 +991,8 @@ class PhotoEditorWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background-color: #1a1a1c;")
+        # Apple Liquid Glass Dark Gray Theme
+        self.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1E1E1E, stop:1 #141414);")
         
         self.current_paths = []
         self.active_path = None
@@ -739,6 +1020,11 @@ class PhotoEditorWidget(QWidget):
         
         self.render_worker = RenderWorker(self)
         self.render_worker.result_ready.connect(self._on_high_res_rendered)
+        self.render_worker.finished.connect(self._on_render_worker_finished)
+        self._pending_high_res_render = False
+        self._ui_animations: list[QPropertyAnimation] = []
+        self._entrance_animated = False
+        self._ai_setup_requires_restart = False
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -757,7 +1043,7 @@ class PhotoEditorWidget(QWidget):
         self.scene.crop_changed.connect(self._on_crop_drawn)
         
         self.view = ZoomableGraphicsView(self.scene)
-        self.view.setBackgroundBrush(QBrush(QColor("#1e1e1e")))
+        self.view.setBackgroundBrush(QBrush(QColor("#111111")))
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setRenderHint(QPainter.SmoothPixmapTransform)
         self.view.setFrameShape(QFrame.NoFrame)
@@ -766,13 +1052,14 @@ class PhotoEditorWidget(QWidget):
         # Filmstrip
         self.filmstrip = QListWidget()
         self.filmstrip.setFlow(QListWidget.LeftToRight)
-        self.filmstrip.setFixedHeight(120)
-        self.filmstrip.setIconSize(QSize(100, 100))
+        self.filmstrip.setFixedHeight(140)
+        self.filmstrip.setIconSize(QSize(110, 110))
         self.filmstrip.setSpacing(5)
+        self.filmstrip.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.filmstrip.setStyleSheet("""
             QListWidget { background: #151515; border: 1px solid #333; border-radius: 8px; padding: 5px; }
             QListWidget::item { border-radius: 4px; border: 2px solid transparent; }
-            QListWidget::item:selected { border: 2px solid #4CAF50; background: #222; }
+            QListWidget::item:selected { border: 2px solid #2ECC71; background: #222222; }
             QListWidget::item:hover { background: #2a2a2a; }
         """)
         self.filmstrip.itemClicked.connect(self._on_filmstrip_clicked)
@@ -786,10 +1073,26 @@ class PhotoEditorWidget(QWidget):
         self.render_timer = QTimer()
         self.render_timer.setSingleShot(True)
         self.render_timer.timeout.connect(lambda: self._trigger_high_res_render())
+        
+        self.diag_worker = DiagnosticsWorker(self)
+        self.diag_worker.finished_diag.connect(self._on_diag_finished)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._entrance_animated:
+            self._entrance_animated = True
+            QTimer.singleShot(20, self._play_entrance_animation)
+
+    def _play_entrance_animation(self):
+        self._animate_widget_fade(self.preview_container, 0.0, 1.0, duration=220)
+        self._animate_widget_fade(self.tools_panel, 0.0, 1.0, duration=280)
 
     def _setup_top_bar(self):
         self.top_bar = QFrame(self)
-        self.top_bar.setStyleSheet("background-color: rgba(30, 30, 32, 0.7); border-bottom: 1px solid rgba(255,255,255,0.1);")
+        self.top_bar.setStyleSheet(
+            "background-color: rgba(20, 27, 38, 0.82); "
+            "border-bottom: 1px solid rgba(255,255,255,0.12);"
+        )
         self.top_bar.setFixedHeight(50)
         
         top_layout = QHBoxLayout(self.top_bar)
@@ -797,7 +1100,7 @@ class PhotoEditorWidget(QWidget):
         
         self.btn_close = QPushButton("Done Editing")
         self.btn_close.setFixedHeight(32)
-        self.btn_close.setStyleSheet("QPushButton { background: rgba(50, 150, 250, 0.2); border: 1px solid #3296fa; color: #3296fa; border-radius: 6px; padding: 4px 16px; font-weight: bold; } QPushButton:hover { background: rgba(50, 150, 250, 0.4); }")
+        self.btn_close.setStyleSheet("QPushButton { background: rgba(46, 204, 113, 0.2); border: 1px solid #2ECC71; color: #2ECC71; border-radius: 6px; padding: 4px 16px; font-weight: bold; } QPushButton:hover { background: rgba(46, 204, 113, 0.4); }")
         self.btn_close.clicked.connect(self.request_close.emit)
         top_layout.addWidget(self.btn_close)
         
@@ -814,7 +1117,7 @@ class PhotoEditorWidget(QWidget):
         } QPushButton:hover { background: rgba(255,255,255,0.15); color: white; }
         QPushButton:disabled { color: #444; border-color: #333; }"""
         
-        self.btn_undo = QPushButton("↩ Undo")
+        self.btn_undo = QPushButton("Undo")
         self.btn_undo.setFixedHeight(32)
         self.btn_undo.setStyleSheet(undo_redo_style)
         self.btn_undo.setShortcut(QKeySequence("Ctrl+Z"))
@@ -823,7 +1126,7 @@ class PhotoEditorWidget(QWidget):
         self.btn_undo.clicked.connect(self.undo_edit)
         top_layout.addWidget(self.btn_undo)
         
-        self.btn_redo = QPushButton("Redo ↪")
+        self.btn_redo = QPushButton("Redo")
         self.btn_redo.setFixedHeight(32)
         self.btn_redo.setStyleSheet(undo_redo_style)
         self.btn_redo.setShortcut(QKeySequence("Ctrl+Y"))
@@ -834,14 +1137,14 @@ class PhotoEditorWidget(QWidget):
         
         top_layout.addStretch()
         
-        self.btn_load_preset = QPushButton("📁 Load Preset")
+        self.btn_load_preset = QPushButton("Load Preset")
         self.btn_load_preset.setFixedHeight(32)
-        self.btn_load_preset.setStyleSheet("QPushButton { background: rgba(50, 150, 250, 0.15); border: 1px solid #3296fa; color: #8ac4ff; border-radius: 6px; padding: 4px 14px; font-weight: bold; } QPushButton:hover { background: rgba(50, 150, 250, 0.3); }")
+        self.btn_load_preset.setStyleSheet("QPushButton { background: rgba(46, 204, 113, 0.15); border: 1px solid #2ECC71; color: #2ECC71; border-radius: 6px; padding: 4px 14px; font-weight: bold; } QPushButton:hover { background: rgba(46, 204, 113, 0.3); }")
         self.btn_load_preset.setToolTip("Load LUT (.cube), XMP, or JSON preset")
         self.btn_load_preset.clicked.connect(self._load_unified_preset)
         top_layout.addWidget(self.btn_load_preset)
         
-        self.btn_save_preset = QPushButton("💾 Save Preset")
+        self.btn_save_preset = QPushButton("Save Preset")
         self.btn_save_preset.setFixedHeight(32)
         self.btn_save_preset.setStyleSheet("QPushButton { background: rgba(100, 200, 100, 0.15); border: 1px solid #4CAF50; color: #81c784; border-radius: 6px; padding: 4px 14px; font-weight: bold; } QPushButton:hover { background: rgba(100, 200, 100, 0.3); }")
         self.btn_save_preset.clicked.connect(self.save_preset)
@@ -853,9 +1156,10 @@ class PhotoEditorWidget(QWidget):
         self.tools_panel = QFrame()
         self.tools_panel.setFixedWidth(380)
         self.tools_panel.setStyleSheet("""
-            background-color: #1e1e20;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1A1A1A, stop:1 #111111);
             border-left: 1px solid rgba(255,255,255,0.08);
-            color: #E0E0E0;
+            border-top-left-radius: 12px;
+            color: #F5F5F7;
         """)
         parent_layout.addWidget(self.tools_panel)
         
@@ -881,13 +1185,13 @@ class PhotoEditorWidget(QWidget):
                 QLabel {
                     font-size: 11px;
                     font-weight: bold;
-                    color: #aaaaaa;
+                    color: #A1B8A6;
                     letter-spacing: 1.5px;
                     padding: 8px 10px 4px 10px;
-                    border-left: 3px solid #4CAF50;
+                    border-left: 3px solid #2ECC71;
                     margin-top: 8px;
-                    background: rgba(255,255,255,0.02);
-                    border-radius: 0px;
+                    background: rgba(46, 204, 113, 0.04);
+                    border-radius: 4px;
                 }
             """)
             parent_lay.addWidget(header)
@@ -915,17 +1219,17 @@ class PhotoEditorWidget(QWidget):
         self.sync_checkboxes['flips'] = chk_sync_flip
         flip_lay.addWidget(chk_sync_flip)
         
-        btn_flip_h = QPushButton("↔") 
+        btn_flip_h = QPushButton("H")
         btn_flip_h.setToolTip("Flip Horizontal")
         btn_flip_h.setCheckable(True)
         btn_flip_h.setFixedSize(40, 30)
-        btn_flip_h.setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background: #2a2a2e; border: 1px solid #444; border-radius: 6px; } QPushButton:checked { background: #4CAF50; border-color: #4CAF50; } QPushButton:hover { background: #383840; }")
+        btn_flip_h.setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background: #2a2a2e; border: 1px solid #444; border-radius: 6px; } QPushButton:checked { background: #2ECC71; border-color: #2ECC71; color: black; } QPushButton:hover { background: #383840; }")
         
-        btn_flip_v = QPushButton("↕") 
+        btn_flip_v = QPushButton("V")
         btn_flip_v.setToolTip("Flip Vertical")
         btn_flip_v.setCheckable(True)
         btn_flip_v.setFixedSize(40, 30)
-        btn_flip_v.setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background: #2a2a2e; border: 1px solid #444; border-radius: 6px; } QPushButton:checked { background: #4CAF50; border-color: #4CAF50; } QPushButton:hover { background: #383840; }")
+        btn_flip_v.setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background: #2a2a2e; border: 1px solid #444; border-radius: 6px; } QPushButton:checked { background: #2ECC71; border-color: #2ECC71; color: black; } QPushButton:hover { background: #383840; }")
         
         def on_flip():
             self._push_undo()
@@ -944,49 +1248,43 @@ class PhotoEditorWidget(QWidget):
         flip_lay.addStretch()
         inner_edit_layout.addLayout(flip_lay)
         
-        # Rotation -45 to 45
+        # Rotation -90 to 90
         rot_header_lay = QHBoxLayout()
         rot_lbl = QLabel("ROTATE & AUTO-LEVEL")
         rot_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #888; letter-spacing: 1px; padding-left: 4px;")
         rot_header_lay.addWidget(rot_lbl)
         self.btn_auto_level = QPushButton("Auto Level")
         self.btn_auto_level.setFixedHeight(24)
-        self.btn_auto_level.setStyleSheet("QPushButton { font-weight: bold; font-size: 10px; background: #2a2a2e; border: 1px solid #444; border-radius: 4px; padding: 2px 10px; } QPushButton:hover { background: #4CAF50; border-color: #4CAF50; }")
+        self.btn_auto_level.setStyleSheet("QPushButton { font-weight: bold; font-size: 10px; background: #2a2a2e; border: 1px solid #444; border-radius: 4px; padding: 2px 10px; } QPushButton:hover { background: #2ECC71; border-color: #2ECC71; color: black; }")
         self.btn_auto_level.clicked.connect(self._auto_level_rotation)
         rot_header_lay.addStretch()
         rot_header_lay.addWidget(self.btn_auto_level)
         inner_edit_layout.addLayout(rot_header_lay)
         
         self.sl_rot = make_pro_slider("Angle", "rotate", inner_edit_layout)
-        self.sl_rot._min = -45
-        self.sl_rot._max = 45
+        self.sl_rot._min = -90
+        self.sl_rot._max = 90
         self.sl_rot._default = 0
         self.sl_rot.sliderPressed.connect(self.scene.show_rotation_grid)
         self.sl_rot.sliderReleased.connect(self.scene.hide_rotation_grid)
         
-        # Upright (Perspective Correction)
-        upright_lbl = QLabel("UPRIGHT")
-        upright_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #888; letter-spacing: 1px; padding-left: 4px; margin-top: 4px;")
-        inner_edit_layout.addWidget(upright_lbl)
+        # Perspective Correction (Auto Geometry)
+        geom_header_lay = QHBoxLayout()
+        geom_lbl = QLabel("GEOMETRY")
+        geom_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #888; letter-spacing: 1px; padding-left: 4px; padding-top: 10px;")
+        geom_header_lay.addWidget(geom_lbl)
         
-        upright_lay = QHBoxLayout()
-        upright_btn_style = """
-            QPushButton {
-                font-size: 10px; font-weight: bold;
-                background: #2a2a2e; border: 1px solid #444;
-                border-radius: 4px; padding: 4px 10px;
-                color: #ccc;
-            }
-            QPushButton:hover { background: #4CAF50; border-color: #4CAF50; color: white; }
-        """
-        for mode_name, mode_key in [("Level", "level"), ("Vertical", "vertical"), 
-                                      ("Full", "full"), ("Auto", "auto")]:
-            btn = QPushButton(mode_name)
-            btn.setFixedHeight(26)
-            btn.setStyleSheet(upright_btn_style)
-            btn.clicked.connect(lambda checked, m=mode_key: self._apply_upright(m))
-            upright_lay.addWidget(btn)
-        inner_edit_layout.addLayout(upright_lay)
+        self.btn_auto_geometry = QPushButton("Auto Geometry")
+        self.btn_auto_geometry.setFixedHeight(24)
+        self.btn_auto_geometry.setStyleSheet("QPushButton { font-weight: bold; font-size: 10px; background: #2a2a2e; border: 1px solid #444; border-radius: 4px; padding: 2px 10px; margin-top: 10px; } QPushButton:hover { background: #2ECC71; border-color: #2ECC71; color: black; }")
+        self.btn_auto_geometry.clicked.connect(self._auto_geometry)
+        
+        geom_header_lay.addStretch()
+        geom_header_lay.addWidget(self.btn_auto_geometry)
+        inner_edit_layout.addLayout(geom_header_lay)
+        self.sl_lens_dist = make_pro_slider("Distortion", "lens_distortion", inner_edit_layout)
+        self.sl_pers_v = make_pro_slider("Vertical", "pers_v", inner_edit_layout)
+        self.sl_pers_h = make_pro_slider("Horizontal", "pers_h", inner_edit_layout)
         
         # Crop section
         crop_header_lay = QHBoxLayout()
@@ -1038,22 +1336,66 @@ class PhotoEditorWidget(QWidget):
         self.sl_nr._default = 0
         
         ai_nr_lay = QHBoxLayout()
+        
+        self.combo_ai_model = QComboBox()
+        self.combo_ai_model.setFixedHeight(28)
+        self.combo_ai_model.setStyleSheet("""
+            QComboBox {
+                font-size: 10px; font-weight: bold;
+                background: #1e1e1e; border: 1px solid #444;
+                color: #ccc; border-radius: 4px; padding-left: 6px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background: #1e1e1e; color: #ccc;
+                selection-background-color: #2ECC71; selection-color: black;
+            }
+        """)
+        for key in DenoiseWorker.MODEL_ORDER:
+            info = DenoiseWorker.MODELS[key]
+            self.combo_ai_model.addItem(info['name'], key)
+            
+        # Tooltips for Models
+        self.combo_ai_model.setItemData(0, "High Quality, slow. Restores massive details using shifted windows.", Qt.ToolTipRole)
+        self.combo_ai_model.setItemData(1, "Very Fast. Best for pure noise removal without generative artifacts.", Qt.ToolTipRole)
+        self.combo_ai_model.setItemData(2, "Generative upscaler. Smooths noise but can hallucinate textures.", Qt.ToolTipRole)
+        self.combo_ai_model.setToolTip("Select the AI Model. Swin2SR is recommended for details.")
+        ai_nr_lay.addWidget(self.combo_ai_model)
+        
         self.btn_ai_denoise = QPushButton("AI Denoise")
         self.btn_ai_denoise.setFixedHeight(28)
         self.btn_ai_denoise.setStyleSheet("""
             QPushButton {
                 font-size: 11px; font-weight: bold;
-                background: rgba(150, 100, 255, 0.15);
-                border: 1px solid #9c64ff;
-                color: #c9a0ff;
-                border-radius: 4px; padding: 4px 12px;
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                color: #2ECC71;
+                border-radius: 6px; padding: 4px 12px;
             }
-            QPushButton:hover { background: rgba(150, 100, 255, 0.35); color: white; }
-            QPushButton:disabled { background: rgba(80, 60, 120, 0.15); color: #665599; }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.15); color: white; border-color: #2ECC71; }
+            QPushButton:disabled { background: rgba(255, 255, 255, 0.03); color: #555; border-color: transparent; }
         """)
         self.btn_ai_denoise.setToolTip("Apply AI-based noise reduction (one-shot, modifies source)")
         self.btn_ai_denoise.clicked.connect(self._apply_ai_denoise)
         ai_nr_lay.addWidget(self.btn_ai_denoise)
+
+        self.btn_ai_abort = QPushButton("Abort")
+        self.btn_ai_abort.setFixedHeight(28)
+        self.btn_ai_abort.setStyleSheet("""
+            QPushButton {
+                font-size: 10px; font-weight: bold;
+                background: rgba(255, 70, 70, 0.12);
+                border: 1px solid #ff5f56;
+                color: #ffb3ad;
+                border-radius: 4px; padding: 4px 10px;
+            }
+            QPushButton:hover { background: rgba(255, 70, 70, 0.28); color: white; }
+            QPushButton:disabled { background: transparent; border-color: #444; color: #555; }
+        """)
+        self.btn_ai_abort.setToolTip("Abort current AI denoise job")
+        self.btn_ai_abort.setEnabled(False)
+        self.btn_ai_abort.clicked.connect(self._abort_ai_denoise)
+        ai_nr_lay.addWidget(self.btn_ai_abort)
         
         self.btn_undo_destructive = QPushButton("Undo")
         self.btn_undo_destructive.setFixedHeight(28)
@@ -1077,15 +1419,16 @@ class PhotoEditorWidget(QWidget):
         
         # AI Denoise progress
         self.denoise_status_lbl = QLabel("")
-        self.denoise_status_lbl.setStyleSheet("font-size: 10px; color: #9c64ff; padding-left: 4px;")
+        self.denoise_status_lbl.setStyleSheet("font-size: 10px; color: #2ECC71; padding-left: 4px;")
         self.denoise_status_lbl.hide()
         inner_edit_layout.addWidget(self.denoise_status_lbl)
         
         self.denoise_progress = QProgressBar()
-        self.denoise_progress.setFixedHeight(4)
+        self.denoise_progress.setFixedHeight(8)
+        self.denoise_progress.setTextVisible(False)
         self.denoise_progress.setStyleSheet("""
-            QProgressBar { border: none; background: #2a2a2e; border-radius: 2px; }
-            QProgressBar::chunk { background: #9c64ff; border-radius: 2px; }
+            QProgressBar { border: none; background: #1a1a1c; border-radius: 4px; margin-top: 4px; margin-bottom: 4px; }
+            QProgressBar::chunk { background: #2ECC71; border-radius: 4px; }
         """)
         self.denoise_progress.hide()
         inner_edit_layout.addWidget(self.denoise_progress)
@@ -1095,6 +1438,7 @@ class PhotoEditorWidget(QWidget):
         self.denoise_worker.progress.connect(self._on_denoise_progress)
         self.denoise_worker.status.connect(self._on_denoise_status)
         self.denoise_worker.finished_ok.connect(self._on_denoise_done)
+        self.denoise_worker.finished_cancel.connect(self._on_denoise_cancelled)
         self.denoise_worker.finished_err.connect(self._on_denoise_error)
         
         # AI Setup button
@@ -1108,12 +1452,28 @@ class PhotoEditorWidget(QWidget):
                 color: #888;
                 border-radius: 4px; padding: 2px 8px;
             }
-            QPushButton:hover { border-color: #9c64ff; color: #c9a0ff; }
+            QPushButton:hover { border-color: #7ab6ff; color: #d7ebff; }
             QPushButton:disabled { color: #555; }
         """)
-        self.btn_ai_setup.setToolTip("Install torch + basicsr and download SCUNet/DnCNN models")
+        self.btn_ai_setup.setToolTip("Install torch/spandrel and download denoise models")
         self.btn_ai_setup.clicked.connect(self._install_ai_models)
         inner_edit_layout.addWidget(self.btn_ai_setup)
+
+        self.btn_ai_diag = QPushButton("GPU Diagnose")
+        self.btn_ai_diag.setFixedHeight(24)
+        self.btn_ai_diag.setStyleSheet("""
+            QPushButton {
+                font-size: 10px;
+                background: transparent;
+                border: 1px dashed #2ECC71;
+                color: #9dc9ff;
+                border-radius: 4px; padding: 2px 8px;
+            }
+            QPushButton:hover { border-color: #7ab6ff; color: #d7ebff; }
+        """)
+        self.btn_ai_diag.setToolTip("Show torch/CUDA backend diagnostics")
+        self.btn_ai_diag.clicked.connect(self._show_ai_diagnostics)
+        inner_edit_layout.addWidget(self.btn_ai_diag)
         
         # Initialize setup worker
         self.setup_worker = SetupWorker(self)
@@ -1136,12 +1496,12 @@ class PhotoEditorWidget(QWidget):
         # Batch Control
         self.btn_export = QPushButton("Export All Selected")
         self.btn_export.setFixedHeight(40)
-        self.btn_export.setStyleSheet("QPushButton { background: #4CAF50; color: white; border-radius: 6px; padding: 4px 12px; font-weight: bold; font-size: 14px; } QPushButton:hover { background: #43a047; }")
+        self.btn_export.setStyleSheet("QPushButton { background: #2ECC71; color: #000; border-radius: 6px; padding: 4px 12px; font-weight: bold; font-size: 14px; } QPushButton:hover { background: #27AE60; }")
         self.btn_export.clicked.connect(self.run_batch_export)
         self.tool_layout.addWidget(self.btn_export)
         
         self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet("QProgressBar { border-radius: 4px; background: #333; } QProgressBar::chunk { background: #4CAF50; border-radius: 4px; }")
+        self.progress_bar.setStyleSheet("QProgressBar { border-radius: 4px; background: #333; } QProgressBar::chunk { background: #2ECC71; border-radius: 4px; }")
         self.progress_bar.hide()
         self.tool_layout.addWidget(self.progress_bar)
 
@@ -1318,15 +1678,21 @@ class PhotoEditorWidget(QWidget):
             self.view.fitInView(self.scene.pixmap_item, Qt.KeepAspectRatio)
 
     def _trigger_high_res_render(self):
-        if not self.preview_pil_image: return
-        
+        if not self.preview_pil_image:
+            return
+
+        if self.render_worker.isRunning():
+            # Coalesce rapid slider changes into one trailing render.
+            self._pending_high_res_render = True
+            return
+
         preview_params = self.edit_params.copy()
         preview_params['crop_top'] = 0
         preview_params['crop_bottom'] = 0
         preview_params['crop_left'] = 0
         preview_params['crop_right'] = 0
-        
-        # Start worker
+
+        self._pending_high_res_render = False
         self.render_worker.setup(self.preview_pil_image, preview_params, self.lut_filter)
         self.render_worker.start()
 
@@ -1341,10 +1707,86 @@ class PhotoEditorWidget(QWidget):
         # Only fit to view if user hasn't manually zoomed
         if not self.view._is_user_zoomed:
             self.view.fitInView(self.scene.pixmap_item, Qt.KeepAspectRatio)
+        self._animate_preview_refresh()
+
+    def _animate_preview_refresh(self):
+        # Disabled viewport opacity animation due to strict Windows QPainter thread enforcement
+        # which crashes when background GPU threads or workers are polling the event loop.
+        pass
+
+    def _on_render_worker_finished(self):
+        if self._pending_high_res_render:
+            self._pending_high_res_render = False
+            QTimer.singleShot(0, self._trigger_high_res_render)
 
     def _auto_level_rotation(self):
-        """Lightroom-grade auto horizon leveling using probabilistic Hough transform
-        with length-weighted angle averaging."""
+        """Robust horizon leveling using HoughLinesP to find dominant straight line segments."""
+        try:
+            import cv2
+            import numpy as np
+            
+            if self.proxy_pil_image is None: return
+            
+            # Use proxy image for speed
+            img_cv = np.array(self.proxy_pil_image.convert('L'))
+            h, w = img_cv.shape
+            
+            # Blur to remove fine textures, leaving only strong structural lines
+            blurred = cv2.GaussianBlur(img_cv, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+            
+            # Use Probabilistic Hough Transform for discrete line segments
+            min_line_length = max(w, h) * 0.1
+            max_line_gap = max(w, h) * 0.05
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=min_line_length, maxLineGap=max_line_gap)
+            
+            if lines is not None:
+                horizontal_angles = []
+                weights = []
+                
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    
+                    # Calculate angle
+                    angle_rad = np.arctan2(y2 - y1, x2 - x1)
+                    angle_deg = np.degrees(angle_rad)
+                    
+                    # Normalize to -90 to 90
+                    if angle_deg > 90: angle_deg -= 180
+                    elif angle_deg < -90: angle_deg += 180
+                        
+                    # Is it a near-horizontal line? (allow up to 25 degrees off perfect level)
+                    if abs(angle_deg) < 25:
+                        length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        horizontal_angles.append(angle_deg)
+                        weights.append(length)
+                
+                if horizontal_angles:
+                    # Weighted average favors longer, more prominent horizon lines
+                    avg_angle = np.average(horizontal_angles, weights=weights)
+                    
+                    # Invert angle because if the horizon is tilted right (positive angle), 
+                    # we must rotate left (negative rotation) to fix it.
+                    correction = -avg_angle
+                    
+                    # Clamp to new UI slider limits
+                    correction = max(-90, min(90, correction))
+                    
+                    # Apply
+                    self.sl_rot.setValue(int(round(correction)))
+                    self.scene.hide_rotation_grid() # UI Refresh
+                    return
+            
+            # Fallback
+            QMessageBox.information(self, "Auto Level", 
+                "Could not detect a clear horizon line.\\nMake sure the image has a visible horizon block.")
+                    
+        except ImportError:
+            QMessageBox.warning(self, "Missing Dependency", 
+                "Auto-Level requires OpenCV.\\nRun: pip install opencv-python")
+
+    def _auto_geometry(self):
+        """Analyze vertical and horizontal line convergence to auto-correct perspective."""
         try:
             import cv2
             import numpy as np
@@ -1354,213 +1796,71 @@ class PhotoEditorWidget(QWidget):
             img_cv = np.array(self.proxy_pil_image.convert('L'))
             h, w = img_cv.shape
             
-            # Multi-scale edge detection for robustness
-            edges1 = cv2.Canny(img_cv, 30, 100, apertureSize=3)
-            edges2 = cv2.Canny(img_cv, 50, 200, apertureSize=3)
-            edges = cv2.bitwise_or(edges1, edges2)
+            # Edge detection optimized for structural lines (buildings, walls)
+            blurred = cv2.GaussianBlur(img_cv, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
             
-            # Use probabilistic Hough — gives line segments with start/end points
-            min_line_length = max(w, h) * 0.08  # Lines must be at least 8% of image
-            max_line_gap = max(w, h) * 0.02
-            lines = cv2.HoughLinesP(edges, 1, np.pi / 360, 80,
-                                     minLineLength=int(min_line_length),
-                                     maxLineGap=int(max_line_gap))
+            min_line_length = max(w, h) * 0.15
+            max_line_gap = max(w, h) * 0.05
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=60, minLineLength=min_line_length, maxLineGap=max_line_gap)
             
-            if lines is not None and len(lines) > 0:
-                angles = []
-                weights = []
+            if lines is not None:
+                vertical_angles = []
+                vertical_weights = []
+                horizontal_angles = []
+                horizontal_weights = []
                 
                 for line in lines:
                     x1, y1, x2, y2 = line[0]
-                    length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                    angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                    angle_rad = np.arctan2(y2 - y1, x2 - x1)
+                    angle_deg = np.degrees(angle_rad)
                     
-                    # Only near-horizontal lines (within ±15° of horizontal)
-                    if abs(angle) <= 15 or abs(abs(angle) - 180) <= 15:
-                        # Normalize angle to -15..+15 range
-                        if abs(angle) > 90:
-                            angle = angle - 180 if angle > 0 else angle + 180
-                        angles.append(angle)
-                        weights.append(length)  # Weight by line length
-                
-                if angles:
-                    angles = np.array(angles)
-                    weights = np.array(weights)
-                    
-                    # Reject outliers using IQR
-                    q1, q3 = np.percentile(angles, [25, 75])
-                    iqr = q3 - q1
-                    mask = (angles >= q1 - 1.5 * iqr) & (angles <= q3 + 1.5 * iqr)
-                    angles = angles[mask]
-                    weights = weights[mask]
-                    
-                    if len(angles) > 0:
-                        # Weighted average for precision
-                        weighted_angle = np.average(angles, weights=weights)
-                        correction = -weighted_angle
+                    if angle_deg > 90: angle_deg -= 180
+                    elif angle_deg < -90: angle_deg += 180
                         
-                        # Clamp to slider range
-                        correction = max(-45, min(45, correction))
-                        self.sl_rot.setValue(int(round(correction)))
-                        return
-            
-            # Fallback: no strong lines found
-            QMessageBox.information(self, "Auto Level", 
-                "Could not detect a clear horizon line.\nTry on an image with visible horizon or straight edges.")
+                    length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                     
-        except ImportError:
-            QMessageBox.warning(self, "Missing Dependency", 
-                "Auto-Level requires OpenCV.\nRun: pip install opencv-python")
+                    # Vertical lines (allow 30 degree tilt)
+                    if 60 < abs(angle_deg) <= 90:
+                        # Deviation from true vertical (90 or -90)
+                        deviation = 90 - abs(angle_deg)
+                        if angle_deg < 0: deviation = -deviation
+                        vertical_angles.append(deviation)
+                        vertical_weights.append(length)
+                        
+                    # Horizontal lines (allow 30 degree tilt)
+                    elif abs(angle_deg) < 30:
+                        horizontal_angles.append(angle_deg)
+                        horizontal_weights.append(length)
+                
+                v_correction = 0
+                h_correction = 0
+                
+                if vertical_angles:
+                    avg_v_tilt = np.average(vertical_angles, weights=vertical_weights)
+                    # Mapping small tilt angles into the -100 to 100 perspective slider range
+                    v_correction = avg_v_tilt * 4.0 
+                    
+                if horizontal_angles:
+                    avg_h_tilt = np.average(horizontal_angles, weights=horizontal_weights)
+                    h_correction = -avg_h_tilt * 4.0 
 
-    def _apply_upright(self, mode='auto'):
-        """Apply perspective correction (Upright).
-        Modes: 'level' (horizon only), 'vertical' (verticals only), 
-               'full' (both), 'auto' (auto-detect best)
-        """
-        try:
-            import cv2
-            import numpy as np
-            
-            if self.preview_pil_image is None: return
-
-            self._save_source_backup()
-
-            # Work on proxy for speed, apply result to full
-            img_cv = np.array(self.proxy_pil_image.convert('RGB'))
-            gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
-            h, w = gray.shape
-            
-            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-            min_len = int(max(w, h) * 0.1)
-            lines = cv2.HoughLinesP(edges, 1, np.pi / 360, 80,
-                                     minLineLength=min_len,
-                                     maxLineGap=int(max(w, h) * 0.02))
-            
-            if lines is None or len(lines) == 0:
-                QMessageBox.information(self, "Upright", "No clear lines detected for perspective correction.")
+                v_val = max(-100, min(100, int(round(v_correction))))
+                h_val = max(-100, min(100, int(round(h_correction))))
+                
+                self.sl_pers_v.setValue(v_val)
+                self.sl_pers_h.setValue(h_val)
+                
+                if v_val == 0 and h_val == 0:
+                     QMessageBox.information(self, "Auto Geometry", "Geometry already appears perfectly aligned.")
                 return
             
-            h_angles = []  # Horizontal line angles
-            h_weights = []
-            v_angles = []  # Vertical line angles
-            v_weights = []
+            QMessageBox.information(self, "Auto Geometry", "Could not detect enough structural lines to correct geometry.")
             
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-                
-                # Horizontal lines: within ±20° of 0° or ±180°
-                if abs(angle) <= 20 or abs(abs(angle) - 180) <= 20:
-                    norm_angle = angle
-                    if abs(norm_angle) > 90:
-                        norm_angle = norm_angle - 180 if norm_angle > 0 else norm_angle + 180
-                    h_angles.append(norm_angle)
-                    h_weights.append(length)
-                # Vertical lines: within ±20° of ±90°
-                elif abs(abs(angle) - 90) <= 20:
-                    v_angle = angle - 90 if angle > 0 else angle + 90
-                    v_angles.append(v_angle)
-                    v_weights.append(length)
-            
-            # Calculate corrections
-            h_correction = 0
-            v_correction = 0
-            
-            if h_angles and mode in ('level', 'full', 'auto'):
-                h_arr = np.array(h_angles)
-                h_w = np.array(h_weights)
-                # IQR outlier removal
-                if len(h_arr) > 2:
-                    q1, q3 = np.percentile(h_arr, [25, 75])
-                    iqr = q3 - q1
-                    mask = (h_arr >= q1 - 1.5 * iqr) & (h_arr <= q3 + 1.5 * iqr)
-                    h_arr, h_w = h_arr[mask], h_w[mask]
-                if len(h_arr) > 0:
-                    h_correction = np.average(h_arr, weights=h_w)
-            
-            if v_angles and mode in ('vertical', 'full', 'auto'):
-                v_arr = np.array(v_angles)
-                v_w = np.array(v_weights)
-                if len(v_arr) > 2:
-                    q1, q3 = np.percentile(v_arr, [25, 75])
-                    iqr = q3 - q1
-                    mask = (v_arr >= q1 - 1.5 * iqr) & (v_arr <= q3 + 1.5 * iqr)
-                    v_arr, v_w = v_arr[mask], v_w[mask]
-                if len(v_arr) > 0:
-                    v_correction = np.average(v_arr, weights=v_w)
-            
-            # Build perspective transform
-            # Rotation for horizon leveling
-            rot_angle = -h_correction
-            
-            # Perspective for vertical correction (keystone)
-            # Vertical tilt creates a trapezoidal distortion
-            v_shift = np.tan(np.radians(v_correction)) * 0.15  # Scale factor
-            
-            # Source and destination points for perspective transform
-            src_pts = np.float32([
-                [0, 0], [w, 0], [w, h], [0, h]
-            ])
-            
-            if mode == 'level':
-                # Just rotation
-                self.sl_rot.setValue(int(round(max(-45, min(45, rot_angle)))))
-                return
-            elif mode == 'vertical':
-                # Vertical perspective only
-                offset = int(w * abs(v_shift))
-                if v_correction > 0:  # Converging at top
-                    dst_pts = np.float32([
-                        [offset, 0], [w - offset, 0], [w, h], [0, h]
-                    ])
-                else:  # Converging at bottom
-                    dst_pts = np.float32([
-                        [0, 0], [w, 0], [w - offset, h], [offset, h]
-                    ])
-            elif mode in ('full', 'auto'):
-                # Both rotation + vertical perspective
-                offset_v = int(w * abs(v_shift))
-                if v_correction > 0:
-                    dst_pts = np.float32([
-                        [offset_v, 0], [w - offset_v, 0], [w, h], [0, h]
-                    ])
-                else:
-                    dst_pts = np.float32([
-                        [0, 0], [w, 0], [w - offset_v, h], [offset_v, h]
-                    ])
-                # Apply rotation via slider (combined with perspective)
-                self.sl_rot.setValue(int(round(max(-45, min(45, rot_angle)))))
-            
-            if mode != 'level':
-                # Apply perspective warp to both proxy and full
-                M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-                
-                # Apply to full resolution
-                full_cv = np.array(self.preview_pil_image.convert('RGB'))
-                fh, fw = full_cv.shape[:2]
-                # Scale the transform matrix for full resolution
-                scale_x, scale_y = fw / w, fh / h
-                S = np.array([[scale_x, 0, 0], [0, scale_y, 0], [0, 0, 1]], dtype=np.float64)
-                S_inv = np.array([[1/scale_x, 0, 0], [0, 1/scale_y, 0], [0, 0, 1]], dtype=np.float64)
-                M_full = S @ M @ S_inv
-                
-                warped_full = cv2.warpPerspective(full_cv, M_full, (fw, fh),
-                                                   borderMode=cv2.BORDER_REFLECT)
-                self.preview_pil_image = Image.fromarray(warped_full)
-                
-                # Apply to proxy
-                warped_proxy = cv2.warpPerspective(
-                    np.array(self.proxy_pil_image.convert('RGB')), M, (w, h),
-                    borderMode=cv2.BORDER_REFLECT)
-                self.proxy_pil_image = Image.fromarray(warped_proxy)
-                
-                self._render_proxy()
-                self._trigger_high_res_render()
-                
         except ImportError:
-            QMessageBox.warning(self, "Missing Dependency", 
-                "Upright requires OpenCV.\nRun: pip install opencv-python")
+            QMessageBox.warning(self, "Missing Dependency", "Auto-Geometry requires OpenCV.\\nRun: pip install opencv-python")
+
+
 
     def _save_source_backup(self):
         """Save backup of current source images for undo."""
@@ -1582,82 +1882,182 @@ class PhotoEditorWidget(QWidget):
 
     def _apply_ai_denoise(self):
         """Start AI denoise in background thread."""
-        if self.preview_pil_image is None: return
-        if self.denoise_worker.isRunning(): return
-        
+        if self.preview_pil_image is None:
+            return
+        if self._ai_setup_requires_restart:
+            QMessageBox.information(
+                self,
+                "Restart Required",
+                "AI backend was updated. Restart the app to enable the new PyTorch/CUDA build.",
+            )
+            return
+        if self.setup_worker.isRunning():
+            QMessageBox.information(self, "AI Setup Running", "Wait for AI setup to finish before denoising.")
+            return
+        if self.denoise_worker.isRunning():
+            return
+
         self._save_source_backup()
-        
-        # Show progress UI
-        self.btn_ai_denoise.setEnabled(False)
-        self.btn_ai_denoise.setText("Processing...")
-        self.denoise_status_lbl.setText("Detecting best available model...")
+
+        self._set_ai_busy(True)
+        diag = DenoiseWorker.get_torch_diagnostics()
+        if diag.get("nvidia_smi_available") and not diag.get("cuda_available"):
+            self.denoise_status_lbl.setText(
+                "CUDA GPU detected but torch CUDA is inactive. Running fallback path."
+            )
+        else:
+            self.denoise_status_lbl.setText("Detecting best available model...")
         self.denoise_status_lbl.show()
         self.denoise_progress.setValue(0)
         self.denoise_progress.show()
-        
+        self._animate_widget_fade(self.denoise_status_lbl, 0.0, 1.0, duration=170)
+        self._animate_widget_fade(self.denoise_progress, 0.0, 1.0, duration=170)
+
         # Start worker
-        self.denoise_worker.setup(self.preview_pil_image.copy(), self.proxy_pil_image.copy())
+        model_key = self.combo_ai_model.currentData()
+        self.denoise_worker.setup(self.preview_pil_image.copy(), self.proxy_pil_image.copy(), model_key)
         self.denoise_worker.start()
-    
+
+    def _abort_ai_denoise(self):
+        if not self.denoise_worker.isRunning():
+            return
+        self.btn_ai_abort.setEnabled(False)
+        self.denoise_status_lbl.setText("Cancelling...")
+        self.denoise_worker.cancel()
+
+    def _set_ai_busy(self, busy: bool):
+        self.btn_ai_denoise.setEnabled(not busy)
+        self.btn_ai_denoise.setText("Processing..." if busy else "AI Denoise")
+        self.btn_ai_abort.setEnabled(busy)
+        self.btn_ai_diag.setEnabled(not busy)
+        if not self.setup_worker.isRunning():
+            self.btn_ai_setup.setEnabled(not busy)
+
+    def _animate_widget_fade(self, widget, start, end, duration=180, hide_on_zero=False):
+        # Disabled QGraphicsOpacityEffect to prevent Windows QPainter threading crashes
+        # when background tasks like nvidia-smi diagnosis or AI denoise lock the event loop
+        if end == 0.0 or hide_on_zero:
+            widget.hide()
+        elif end > 0.0:
+            widget.show()
+
     def _on_denoise_progress(self, val):
         self.denoise_progress.setValue(val)
-    
+
     def _on_denoise_status(self, text):
         self.denoise_status_lbl.setText(text)
-    
+
     def _on_denoise_done(self, full_pil, proxy_pil, method):
         self.preview_pil_image = full_pil
         self.proxy_pil_image = proxy_pil
         self._render_proxy()
         self._trigger_high_res_render()
-        
+
         self.denoise_progress.setValue(100)
-        self.denoise_status_lbl.setText(f"Done — {method}")
-        self.btn_ai_denoise.setEnabled(True)
-        self.btn_ai_denoise.setText("AI Denoise")
-        
-        # Auto-hide progress after 3s
-        QTimer.singleShot(3000, self._hide_denoise_progress)
-    
+        self.denoise_status_lbl.setText(f"Done - {method}")
+        self._set_ai_busy(False)
+        # Auto-hide progress after a short delay
+        QTimer.singleShot(1800, self._hide_denoise_progress)
+
+    def _on_denoise_cancelled(self, msg):
+        self.denoise_progress.setValue(0)
+        self.denoise_status_lbl.setText(msg)
+        self._set_ai_busy(False)
+        # Cancel means no source replacement happened; clear backup.
+        self._source_backup = None
+        self.btn_undo_destructive.setEnabled(False)
+        QTimer.singleShot(1200, self._hide_denoise_progress)
+
     def _on_denoise_error(self, msg):
-        self.btn_ai_denoise.setEnabled(True)
-        self.btn_ai_denoise.setText("AI Denoise")
+        self._set_ai_busy(False)
         self.denoise_status_lbl.setText("Failed")
         self._source_backup = None
         self.btn_undo_destructive.setEnabled(False)
-        QTimer.singleShot(2000, self._hide_denoise_progress)
+        QTimer.singleShot(1200, self._hide_denoise_progress)
         QMessageBox.warning(self, "AI Denoise Error", msg)
-    
+
     def _hide_denoise_progress(self):
-        self.denoise_progress.hide()
-        self.denoise_status_lbl.hide()
+        # Keep the status label visible, only hide the progress bar
+        self._animate_widget_fade(self.denoise_progress, 1.0, 0.0, duration=180, hide_on_zero=True)
+
+    def _show_ai_diagnostics(self):
+        if self.diag_worker.isRunning():
+            return
+        self.btn_ai_diag.setEnabled(False)
+        self.btn_ai_diag.setText("Diagnosing...")
+        self.diag_worker.start()
+
+    def _on_diag_finished(self, diag):
+        self.btn_ai_diag.setEnabled(True)
+        self.btn_ai_diag.setText("GPU Diagnose")
+
+        lines = []
+        lines.append("AI Backend Diagnostics")
+        lines.append("")
+        lines.append(f"- torch installed: {diag.get('torch_installed')}")
+        if diag.get("torch_installed"):
+            lines.append(f"- torch version: {diag.get('torch_version')}")
+            lines.append(f"- torch CUDA build: {diag.get('torch_cuda_build') or 'none'}")
+            lines.append(f"- torch CUDA available: {diag.get('cuda_available')}")
+            lines.append(f"- CUDA device count: {diag.get('cuda_device_count')}")
+            for idx, name in enumerate(diag.get("cuda_devices", [])):
+                lines.append(f"  - GPU {idx}: {name}")
+            lines.append(f"- MPS available: {diag.get('mps_available')}")
+        else:
+            lines.append(f"- torch import error: {diag.get('error') or 'unknown'}")
+
+        lines.append(f"- nvidia-smi visible: {diag.get('nvidia_smi_available')}")
+        if diag.get("nvidia_smi_output"):
+            lines.append(f"- nvidia-smi: {diag.get('nvidia_smi_output')}")
+
+        if not diag.get("cuda_available"):
+            reason = diag.get("cuda_unavailable_reason") or "CUDA unavailable"
+            lines.append("")
+            lines.append(f"Current reason: {reason}")
+            lines.append("Recommended install command:")
+            lines.append(
+                "python -m pip install --upgrade --force-reinstall torch torchvision "
+                "--index-url https://download.pytorch.org/whl/cu121"
+            )
+
+        QMessageBox.information(self, "GPU Diagnose", "\n".join(lines))
 
     def _install_ai_models(self):
         """Start background installation of AI packages and model downloads."""
-        if self.setup_worker.isRunning(): return
-        
+        if self.setup_worker.isRunning():
+            return
+
+        self.btn_ai_denoise.setEnabled(False)
+        self.btn_ai_abort.setEnabled(False)
         self.btn_ai_setup.setEnabled(False)
+        self.btn_ai_diag.setEnabled(False)
         self.btn_ai_setup.setText("Installing...")
         self.denoise_status_lbl.setText("Starting AI setup...")
         self.denoise_status_lbl.show()
         self.denoise_progress.setValue(0)
         self.denoise_progress.show()
-        
+
         self.setup_worker.start()
-    
+
     def _on_setup_finished(self, success, summary):
-        self.btn_ai_setup.setEnabled(True)
+        busy = self.denoise_worker.isRunning()
+        self.btn_ai_denoise.setEnabled(not busy)
+        self.btn_ai_setup.setEnabled(not busy)
+        self.btn_ai_diag.setEnabled(not busy)
         self.btn_ai_setup.setText("Install AI Models")
         self.denoise_progress.setValue(100)
-        
+        self._ai_setup_requires_restart = "restart app" in summary.lower()
+
         if success:
             self.denoise_status_lbl.setText("AI setup complete")
         else:
             self.denoise_status_lbl.setText("Setup completed with errors")
-        
-        QTimer.singleShot(3000, self._hide_denoise_progress)
-        
+
+        QTimer.singleShot(2000, self._hide_denoise_progress)
+
         title = "AI Setup Complete" if success else "AI Setup - Partial"
+        if self._ai_setup_requires_restart:
+            title = f"{title} (Restart Required)"
         QMessageBox.information(self, title, summary)
 
     def _load_unified_preset(self):
@@ -1674,7 +2074,7 @@ class PhotoEditorWidget(QWidget):
             # LUT file
             self.lut_path = path
             self.lut_filter = PhotoEditor.load_cube_lut(path)
-            self.lbl_preset.setText(f"🎨 LUT: {Path(path).stem[:20]}")
+            self.lbl_preset.setText(f"LUT: {Path(path).stem[:20]}")
             self.lbl_preset.setStyleSheet("color: #81c784; font-size: 10px; font-weight: bold;")
             self._render_proxy()
             self._trigger_high_res_render()
@@ -1685,7 +2085,7 @@ class PhotoEditorWidget(QWidget):
             if mapped:
                 self.edit_params.update(mapped)
                 self._sync_sidebar_from_params()
-                self.lbl_preset.setText(f"📷 XMP: {Path(path).stem[:20]}")
+                self.lbl_preset.setText(f"XMP: {Path(path).stem[:20]}")
                 self.lbl_preset.setStyleSheet("color: #8ac4ff; font-size: 10px; font-weight: bold;")
                 self._trigger_high_res_render()
             else:
@@ -1711,7 +2111,7 @@ class PhotoEditorWidget(QWidget):
                     self.lut_filter = None
                     self.lut_path = ""
                 self._sync_sidebar_from_params()
-                self.lbl_preset.setText(f"⚙️ JSON: {Path(path).stem[:20]}")
+                self.lbl_preset.setText(f"JSON: {Path(path).stem[:20]}")
                 self.lbl_preset.setStyleSheet("color: #ffb74d; font-size: 10px; font-weight: bold;")
                 self._trigger_high_res_render()
             except Exception as e:
@@ -1747,7 +2147,7 @@ class PhotoEditorWidget(QWidget):
         self.btn_flip_v.blockSignals(False)
         
         if self.lut_path:
-            self.lbl_preset.setText(f"🎨 LUT: {Path(self.lut_path).stem[:20]}")
+            self.lbl_preset.setText(f"LUT: {Path(self.lut_path).stem[:20]}")
             self.lbl_preset.setStyleSheet("color: #81c784; font-size: 10px; font-weight: bold;")
         else:
             self.lbl_preset.setText("No preset loaded")
@@ -1850,3 +2250,4 @@ class PhotoEditorWidget(QWidget):
         # Only auto-fit if user hasn't manually zoomed (prevents zoom reset on monitor change)
         if self.preview_pil_image and not self.view._is_user_zoomed:
             self.view.fitInView(self.scene.pixmap_item, Qt.KeepAspectRatio)
+

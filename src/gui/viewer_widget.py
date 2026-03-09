@@ -69,7 +69,7 @@ class FullViewerWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background-color: #000000;")
+        self.setStyleSheet("background-color: #0A0A0C;")
         self.setFocusPolicy(Qt.StrongFocus)
         
         self.current_path: Path | None = None
@@ -106,7 +106,7 @@ class FullViewerWidget(QWidget):
     def _setup_overlays(self):
         # Top Bar
         self.top_bar = QFrame(self)
-        self.top_bar.setStyleSheet("background-color: rgba(30, 30, 32, 0.7); border-bottom: 1px solid rgba(255,255,255,0.1); border-radius: 0px;")
+        self.top_bar.setStyleSheet("background-color: rgba(22, 22, 24, 0.75); border-bottom: 1px solid rgba(255,255,255,0.08); border-radius: 0px;")
         self.top_bar.setFixedHeight(50)
         
         top_layout = QHBoxLayout(self.top_bar)
@@ -125,9 +125,9 @@ class FullViewerWidget(QWidget):
         self.btn_open.setFixedHeight(32)
         self.btn_open.setStyleSheet("""
             QPushButton {
-                background: rgba(60, 60, 60, 0.4); color: #e0e0e0; font-size: 10pt; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 4px 12px;
+                background: rgba(46, 204, 113, 0.15); color: #2ECC71; font-size: 10pt; border: 1px solid rgba(46, 204, 113, 0.3); border-radius: 6px; padding: 4px 12px; font-weight: bold;
             }
-            QPushButton:hover { background-color: rgba(80, 80, 80, 0.6); color: white; }
+            QPushButton:hover { background-color: rgba(46, 204, 113, 0.3); color: white; }
         """)
         self.btn_open.clicked.connect(self.request_open_folder.emit)
         top_layout.addWidget(self.btn_open)
@@ -138,7 +138,7 @@ class FullViewerWidget(QWidget):
             QPushButton {
                 background: rgba(200, 50, 50, 0.4); color: #f0f0f0; font-size: 10pt; border: 1px solid rgba(255,100,100,0.2); border-radius: 6px; padding: 4px 12px; font-weight: bold;
             }
-            QPushButton:hover { background-color: rgba(220, 60, 60, 0.8); color: #ffffff; }
+            QPushButton:hover { background-color: rgba(220, 60, 60, 0.6); color: #ffffff; }
         """)
         self.btn_close.clicked.connect(self.request_close.emit)
         top_layout.addWidget(self.btn_close)
