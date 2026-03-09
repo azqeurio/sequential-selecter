@@ -1,219 +1,257 @@
 # Sequential Selector
-사진을 빠르게 비교·선별하기 위한 데스크톱 애플리케이션입니다.  
-A desktop application for fast photo comparison and culling.
+
+사진을 빠르게 비교·선별하고,  편집 / webp 출력/ 프레임 씌우기/ AI 노이즈 제거까지 한 곳에서 해결하는 데스크톱 사진 워크플로우 애플리케이션입니다.
+
+A powerful all-in-one desktop photo workflow app for fast culling, editing, webp output, frame design, AI denoising, and batch export.
 
 ---
 
-#  한국어 README
+# 🇰🇷 한국어
 
 ## 소개
-**Sequential Selector** 는 연속촬영 사진을 빠르게 비교하고 정리하기 위해 설계된 데스크톱 애플리케이션입니다.  
-폴더를 선택하면 이미지가 그리드 형태로 표시되며, 두 개의 프리뷰 슬롯을 통해 사진을 확대·이동하며 세밀하게 비교할 수 있습니다. 선택한 이미지는 드래그 앤 드롭 또는 단축키로 Target 폴더로 즉시 이동하여 정리 효율을 크게 높일 수 있습니다.
+**Sequential Selector**는 수많은 사진(RAW 파일 및 연속촬영 결과물 포함)을 빠르게 비교·선별하고, 보정과 AI 노이즈 제거를 적용하며, 프레임과 함께 일괄 내보낼 수 있도록 설계된 올인원 사진 앱입니다.
 
-## 주요 기능
+## 핵심 기능
 
-### • 그리드 썸네일 뷰
-- 선택한 폴더의 이미지가 정사각형 썸네일로 표시됩니다.
-- Ctrl + 마우스 휠 로 썸네일 크기를 80px~1600px 범위에서 확대/축소할 수 있습니다.
-- 크게 확대하면 자동으로 고해상도 썸네일을 다시 로딩하여 화질을 유지합니다.
+### 📸 초고속 브라우징 & 듀얼 뷰어
+- **그리드 뷰** —  사진을 끊김 로드 (Ctrl + 휠로 썸네일 크기 조절)
+- **듀얼 프리뷰 슬롯** — 상/하 두 개의 슬롯에 사진을 띄워 마우스 드래그로 세밀하게 비교
+- **줌/스크롤 상태 유지** — 확대 후 다른 사진으로 넘어가도 동일한 줌·위치 유지
+- **공통/독립 줌 모드** — 두 뷰어의 줌 상태를 동기화하거나 독립적으로 운용 가능
+- 화살표 키 탐색 지원
 
-### • 듀얼 프리뷰 슬롯
-- 상단 Slot1, 하단 Slot2 두 영역에서 서로 다른 사진을 동시에 비교할 수 있습니다.
-- 마우스 드래그로 패닝, 마우스 휠로 확대/축소 가능(보조키 불필요).
-- 줌/스크롤 상태는 다른 사진을 열어도 유지됩니다.
+### ⭐  등급분류 (Rating & Filtering)
+- **1–5 Star 별점** 
+- **Reject (X)** 처리로 불필요한 사진 빠르게 걸러내기
+- 필터링 패널을 통해 원하는 등급의 사진만 모아보기
+- 그리드 뷰에서 바로 평점 매기기 지원
 
-### • 다중 선택 및 드래그 이동
-- 마우스 드래그로 러버 밴드 박스를 생성하여 여러 썸네일을 선택할 수 있습니다.
-- 드래그 중 선택 개수가 표시되어 이동할 파일 수를 즉시 확인할 수 있습니다.
-- 선택한 파일을 Target1 또는 Target2 라벨로 드래그하면 해당 폴더로 이동합니다.
+### 🎨 사진 에디터 (Photo Editor)
+간단한 편집 기능:
 
-### • 키보드 단축키
-- 방향키: 썸네일 이동
-- Enter: 현재 선택 이미지를 프리뷰에 표시
-- 숫자키 `1` / `2`: Target1 / Target2 폴더로 이동  
-  - 키를 누른 상태에서 썸네일 클릭: 단일 파일 즉시 이동  
-  - 다중 선택 후 `1` 또는 `2`: 여러 파일을 한 번에 이동  
-- `Ctrl + Z`: Undo  
-- `Ctrl + Y`: Redo  
+- **색보정** — 노출, 대비, 하이라이트, 섀도, 화이트, 블랙, 선명도, 채도, 활력, 색온도, 색조, 안개 제거, 비네팅, 입자, 샤프닝
+- **크롭 & 회전** — 자유 크롭, ±90° 수동 회전, 회전 시 3×3 그리드 오버레이
+- **자동 수평** — `HoughLinesP` 기반 수평선 감지로 자동 수평 보정
+- **자동 기하 보정** — 수직/수평 원근 왜곡을 자동 분석하여 보정
+- **LUT / XMP / JSON 프리셋** — `.cube` LUT, Adobe XMP, JSON 프리셋 로드/저장
+- **AI 노이즈 제거** — Swin2SR, SCUNet, Real-ESRGAN 모델 (spandrel) 지원
+- **일괄 적용 & 내보내기** — 현재 편집을 모든 이미지에 적용 후 일괄 내보내기 (WebP / JPG / PNG, 품질·크기 설정)
 
-### • 듀얼 모드 (Dual Mode)
-- `Ctrl + D` 또는 버튼으로 썸네일 창과 프리뷰 창을 분리/합치기 가능
-- 듀얼 모니터 환경에서 유용함
 
-### • Undo / Redo
-- 파일 이동 실수 시 즉시 복구 가능
-- 이름 충돌 시 자동으로 `_restored`, `_1` 등의 안전한 이름으로 저장
+### 🖼️  프레임 에디터
+사진에 여백·촬영 정보를 삽입하는  프레임 :
 
-### • 언어 전환 및 도움말
-- UI 언어를 한국어/영어로 즉시 전환 가능
-- 프로그램 내 도움말 창 제공
-- 후원 기능 제공
+- **자동 EXIF 추출** — 카메라 기종, 렌즈, 조리개, 셔터스피드, ISO
+- **스플릿 뷰** — 가로/세로 사진을 동시에 독립적으로 디자인
+- **드래그 & 스냅** — 텍스트/이미지를 캔버스 내에서 자유로이 이동, 중앙·테두리 스냅 정렬
+- **독립 여백 설정** — 상/하/좌/우 여백 각각 조절
+- **커스텀 디자인** — 프레임 색상, 텍스트 색상 (Hex 코드), 폰트 선택
+- **프리셋 저장/불러오기** — JSON으로 레이아웃 저장 및 재사용
+- **카메라 로고 추가**
+
+### 📂 사진 정리기 (Photo Organizer)
+SD 카드나 폴더 내 사진을 자동 분류:
+
+- 카메라 / 렌즈 / 날짜 / 파일 유형 기반 폴더 구조 생성
+- RAW / JPG 분리 옵션
+- 미리보기 트리 & 스캔 → 정리 워크플로우
+- 중복 정책: 묻기 / 건너뛰기 / 새 이름 저장
+- 복사 또는 이동 선택
+
+### 🚀 일괄 처리 & 안전장치
+- 여러 장의 사진을 선택 후 일괄 Export
+- 드래그 앤 드롭 및 단축키(1, 2)로 Target 폴더에 사진 이동
+- Multi-Threading으로 UI 블로킹 없는 부드러운 처리
+- `Ctrl + Z`로 파일 이동 즉시 취소 가능
+- 이름 충돌 시 자동 안전한 이름 부여
+
+### 🌐 다국어 지원
+- 한국어 / English 실시간 전환
 
 ## 지원 이미지 포맷
-- 일반 이미지: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`
-- HEIF/HEIC: `.heic`, `.heif`
-- RAW: `.arw`, `.cr2`, `.cr3`, `.nef`, `.rw2`, `.orf`, `.raf`, `.dng`  
-- NEF 파일은 내장 썸네일 우선 추출 후 RAW 디코딩을 시도하여 가능한 한 표시되도록 구현됨
+| 구분 | 확장자 |
+|------|--------|
+| **일반 이미지** | `.jpg` `.jpeg` `.png` `.bmp` `.gif` `.tif` `.tiff` `.webp` |
+| **HEIF/HEIC** | `.heic` `.heif` |
+| **RAW** | `.arw` `.cr2` `.cr3` `.nef` `.rw2` `.orf` `.raf` `.dng` |
 
 ---
 
-## 설치 및 실행
+## 💻 설치 및 실행
 
-### 1. Windows
-- GitHub Releases에서 `.exe` 파일을 다운로드하여 바로 실행할 수 있습니다.
-- Python 환경 없이 단일 실행 파일로 동작합니다.
+### Windows (설치 파일)
+GitHub **Releases** 탭에서 `.exe` 파일 다운로드 → Python 설치 없이 바로 실행
 
-### 2. macOS (직접 빌드)
-macOS에서 `.app` 번들을 생성하려면 다음이 필요합니다.
-- macOS 12 이상 (Apple Silicon 권장)
-- Python 3.10 이상 (Homebrew 또는 python.org의 universal2 권장)
+### macOS (설치 파일)
+GitHub **Releases** 탭에서 `.zip` 파일 다운로드 → 압축 해제 후 `.app` 실행
 
-#### (1) 필수 패키지 설치
+### 직접 실행 (Python 3.10+)
 ```bash
-python3 -m pip install --upgrade pip
-python3 -m pip install PySide6 rawpy pillow pillow-heif
-python3 -m pip install pyinstaller
-````
+# 필수 패키지 설치
+pip install PySide6 Pillow rawpy pillow-heif exifread opencv-python numpy
 
-#### (2) .app 생성
-
-`run.py` 가 있는 디렉터리에서 실행합니다:
-
-```bash
-pyinstaller \
-  --name "Sequential Selector" \
-  --windowed \
-  run.py
+# 프로그램 실행
+python run.py
 ```
 
-빌드 후 `dist/Sequential Selector.app` 가 생성됩니다.
+### 빌드 (PyInstaller)
+```bash
+pip install pyinstaller
+
+# Windows
+pyinstaller ssc.spec
+
+# macOS
+pyinstaller ssc_macos.spec
+```
+
+> **AI 노이즈 제거**를 사용하려면 `torch`와 `spandrel`이 필요합니다. 앱 내 "Install AI Models" 버튼으로 자동 설치되거나 수동으로 설치할 수 있습니다:
+> ```bash
+> pip install torch torchvision spandrel
+> ```
 
 ---
 
-## 기본 사용 흐름
-
-1. Image Folder 버튼으로 원본 폴더 선택
-2. Target1 / Target2 폴더 지정
-3. 더블 클릭으로 Slot1, `Ctrl + 더블블클릭` 으로 Slot2에 표시
-4. `1` 또는 `2` 키, 또는 드래그 앤 드롭으로 파일 이동
-5. 잘못 이동한 경우 `Ctrl + Z` 로 복구
+## 단축키
+| 키 | 기능 |
+|----|------|
+| `1` / `2` | Target1 / Target2 폴더로 사진 이동 |
+| `0–5` | 별점 지정 |
+| `X` | Reject 처리 |
+| `←` `→` | 이전/다음 사진 |
+| `Ctrl + Z` | 실행 취소 |
+| `Ctrl + Y` | 재실행 |
+| `Ctrl + Wheel` | 썸네일 크기 조절 |
 
 ---
 
 ## 라이선스
-
-이 프로젝트는 MIT License를 따릅니다.
-자세한 내용은 `LICENSE` 파일을 참고하십시오.
+이 소프트웨어는 **MIT License**로 배포됩니다.
 
 ---
+---
 
-# English README
+# 🇺🇸 English
 
 ## Overview
+**Sequential Selector** is a professional all-in-one desktop photo workflow application. It combines lightning-fast photo culling, Lightroom-grade color editing, AI-powered noise reduction, a fully customizable EXIF frame editor, and intelligent photo organization — all in a single tool.
 
-**Sequential Selector** is a desktop tool designed for fast comparison and culling of similar photos.
-It loads all images in a selected folder as square thumbnails and offers two independent preview slots for detailed zoom and pan comparison. Selected files can be moved to target folders using drag & drop or keyboard shortcuts.
+## Key Features
 
-## Features
+### 📸 Fast Grid & Dual Viewer
+- **Grid View** — Seamlessly load hundreds of photos (Ctrl + Wheel to resize thumbnails)
+- **Dual Preview Slots** — Compare two images side-by-side with mouse-drag panning
+- **Persistent Zoom/Pan** — Zoom position preserved across photo navigation
+- **Linked / Independent Zoom** — Sync or decouple zoom across both viewers
+- Arrow key navigation
 
-### • Grid Thumbnail View
+### ⭐ Professional Rating & Filtering
+- **1–5 Star ratings** and **Color labels** (Red, Yellow, Green, Blue, Purple)
+- **Reject (X)** tagging for quick culling
+- Filter panel to show only specific ratings or approved photos
+- Rate directly from grid view
 
-* Displays all images as square thumbnails.
-* `Ctrl + mouse wheel` to zoom thumbnails (80px–1600px).
-* High-resolution thumbnails reload automatically when zoomed in.
+### 🎨 Photo Editor
+Professional Lightroom-style photo editing:
 
-### • Dual Preview Slots
+- **Color Science** — Exposure, contrast, highlights, shadows, whites, blacks, clarity, saturation, vibrance, temperature, tint, dehaze, vignette, grain, sharpening
+- **Crop & Rotate** — Free crop box, ±90° manual rotation with 3×3 grid overlay
+- **Auto Level** — HoughLinesP-based horizon detection for automatic straightening
+- **Auto Geometry** — Automatic vertical/horizontal perspective correction
+- **Preset Support** — Load/save `.cube` LUT, Adobe XMP, and JSON presets
+- **AI Denoising** — Swin2SR, SCUNet, Real-ESRGAN models via spandrel
+  - Auto-detects CUDA · Apple MPS · CPU
+  - ~15 seconds for 5220×3912 on RTX 3060 12GB
+  - One-click model download & installation
+- **Batch Apply & Export** — Apply current edits to all images, export as WebP/JPG/PNG with quality and size options
+- **Undo / Redo** — Full Ctrl+Z / Ctrl+Y support for all edits
 
-* Two independent preview areas (Slot1 top, Slot2 bottom).
-* Pan with mouse drag, zoom with mouse wheel.
-* Zoom and scroll positions persist across image changes.
+### 🖼️ EXIF Frame Editor
+Add stylish borders with shooting info to your photos:
 
-### • Multi-Selection & Drag Moving
+- **Auto EXIF extraction** — Camera body, lens, aperture, shutter speed, ISO
+- **Split View** — Design landscape & portrait templates simultaneously
+- **Drag & Snap** — Freely move text/images on canvas with center/edge snapping
+- **Independent Margins** — Top/Bottom/Left/Right margin control
+- **Custom Styling** — Frame color, text color (hex), font selection
+- **Preset Save/Load** — Store layouts as JSON for reuse
+- **Camera Logo Support**
 
-* Drag to create a rubber-band selection rectangle.
-* Drag selected thumbnails onto Target1 or Target2 to move files.
-* Selection count is displayed during dragging.
+### 📂 Photo Organizer
+Automatically sort photos from SD cards or folders:
 
-### • Keyboard Shortcuts
+- Organize by camera / lens / date / file type
+- Separate RAW and JPG option
+- Preview tree & scan → sort workflow
+- Duplicate policy: Ask / Skip / Rename
+- Copy or Move mode
 
-* Arrow keys: navigate thumbnails
-* Enter: show selected image in preview
-* Number keys:
+### 🚀 Batch Pipeline & Safety
+- Batch export with EXIF frames applied
+- Drag-and-drop or keyboard shortcuts (1, 2) to move to target folders
+- Multi-threaded processing without UI freezing
+- `Ctrl + Z` to instantly undo file moves
+- Automatic safe filename on conflicts
 
-  * `1`: move selection to Target1
-  * `2`: move to Target2
-  * Hold `1` or `2` while clicking: instantly move clicked image
-  * Multi-select + `1` or `2`: move all at once
-* `Ctrl + Z`: Undo
-* `Ctrl + Y`: Redo
-
-### • Dual Mode
-
-* Toggle with `Ctrl + D` or button
-* Splits thumbnail view and preview into separate windows
-* Optimized for dual-monitor setups
-
-### • Undo/Redo System
-
-* Reverts mistaken moves
-* Handles filename conflicts with automatic safe renaming
-
-### • Language Toggle & Help
-
-* Switch UI between Korean and English
-* In-app help window included
-* Donation link provided
+### 🌐 Bilingual Interface
+- Korean / English real-time language toggle
 
 ## Supported Formats
-
-* Standard: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`
-* HEIF/HEIC: `.heic`, `.heif`
-* RAW: `.arw`, `.cr2`, `.cr3`, `.nef`, `.rw2`, `.orf`, `.raf`, `.dng`
-* NEF files are decoded via embedded thumbnail first, then full RAW if needed
-
----
-
-## Installation & Build
-
-### Windows
-
-Download the ready-to-use `.exe` file from GitHub Releases.
-No Python environment is required.
-
-### macOS (Build from source)
-
-#### (1) Install dependencies
-
-```bash
-python3 -m pip install --upgrade pip
-python3 -m pip install PySide6 rawpy pillow pillow-heif
-python3 -m pip install pyinstaller
-```
-
-#### (2) Build the .app bundle
-
-```bash
-pyinstaller \
-  --name "Sequential Selector" \
-  --windowed \
-  run.py
-```
-
-The generated application will be in `dist/Sequential Selector.app`.
+| Category | Extensions |
+|----------|-----------|
+| **Standard** | `.jpg` `.jpeg` `.png` `.bmp` `.gif` `.tif` `.tiff` `.webp` |
+| **HEIF/HEIC** | `.heic` `.heif` |
+| **RAW** | `.arw` `.cr2` `.cr3` `.nef` `.rw2` `.orf` `.raf` `.dng` |
 
 ---
 
-## Basic Workflow
+## 💻 Installation
 
-1. Choose source folder (Image Folder)
-2. Set Target1 / Target2 folders
-3. Double Click → Slot1, Ctrl+ Double Click → Slot2
-4. Move files using keys (`1`, `2`) or drag & drop
-5. Undo mistakes with `Ctrl + Z`
+### Windows (Prebuilt)
+Download the `.exe` from the GitHub **Releases** tab — no Python required.
+
+### macOS (Prebuilt)
+Download the `.zip` from the GitHub **Releases** tab — extract and run the `.app` bundle.
+
+### Run from Source (Python 3.10+)
+```bash
+# Install dependencies
+pip install PySide6 Pillow rawpy pillow-heif exifread opencv-python numpy
+
+# Run
+python run.py
+```
+
+### Build Standalone Executable
+```bash
+pip install pyinstaller
+
+# Windows
+pyinstaller ssc.spec
+
+# macOS
+pyinstaller ssc_macos.spec
+```
+
+> **AI Denoising** requires `torch` and `spandrel`. The app can auto-install them via the built-in "Install AI Models" button, or install manually:
+> ```bash
+> pip install torch torchvision spandrel
+> ```
+
+---
+
+## Keyboard Shortcuts
+| Key | Action |
+|-----|--------|
+| `1` / `2` | Move photo to Target1 / Target2 |
+| `0–5` | Set star rating |
+| `X` | Reject photo |
+| `←` `→` | Previous / Next photo |
+| `Ctrl + Z` | Undo |
+| `Ctrl + Y` | Redo |
+| `Ctrl + Wheel` | Resize thumbnails |
 
 ---
 
 ## License
-
-This project is licensed under the MIT License.
-See the `LICENSE` file for details.
+This software is distributed under the **MIT License**. Feel free to use and contribute!
