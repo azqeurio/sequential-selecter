@@ -31,13 +31,12 @@ jobs:
           brew install libraw libheif
 
       # 5. Python 의존성 설치
-      #    exifread: metadata.py에서 사용 (requirements.txt에 누락되어 있음)
       - name: Install Python dependencies
         env:
           PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 Pillow rawpy pillow-heif==1.2.1 exifread numpy pyinstaller
+          pip install PySide6 Pillow rawpy pillow-heif==1.2.1 exifread numpy opencv-python-headless pyinstaller
 
       # 6. macOS spec 파일 생성
       - name: Create macOS spec file
@@ -49,6 +48,7 @@ jobs:
 
           datas = [
               ('src/i18n', 'src/i18n'),
+              ('src/resources', 'src/resources'),
           ]
 
           hiddenimports = [
@@ -62,9 +62,14 @@ jobs:
               'PIL.Image',
               'PIL.ImageOps',
               'PIL.ImageQt',
+              'PIL.ImageEnhance',
+              'PIL.ImageFilter',
               'PIL.ExifTags',
               'exifread',
               'numpy',
+              'cv2',
+              'json',
+              'concurrent.futures',
           ]
 
           a = Analysis(
@@ -136,7 +141,6 @@ jobs:
         run: find dist -maxdepth 3
 
       # 9. .app을 zip으로 압축
-      #    BUNDLE 방식: dist/SequentialSelector.app 에 생성됨
       - name: Compress .app into zip
         run: |
           cd dist
