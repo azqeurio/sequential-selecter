@@ -13,7 +13,6 @@ TRANSLATIONS = {
         'language': 'English',
         'slot1_prompt': '썸네일 클릭 → Slot1 프리뷰 (위)',
         'slot2_prompt': 'Ctrl+클릭 → Slot2 프리뷰 (아래)',
-        'slot2_prompt': 'Ctrl+클릭 → Slot2 프리뷰 (아래)',
         'empty': '비어있음',
         'organize': '사진 이동',
         # Organizer

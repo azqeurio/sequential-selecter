@@ -401,7 +401,6 @@ class OrganizerWidget(QWidget):
             
         self._update_config()
         self.log("Starting scan...")
-        self.log("Starting scan...")
         # self.tabs.setCurrentIndex(2) # External log handling
         
         self.sorter = Sorter(self.sorter_config)

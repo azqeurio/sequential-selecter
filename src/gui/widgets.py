@@ -1,615 +1,488 @@
-from pathlib import Path
-
-from PySide6.QtCore import (
-    Qt, QSize, QThread, Signal, QObject, QRect, QPoint, QTimer
-)
-from PySide6.QtGui import (
-    QPixmap, QDrag, QPainter, QColor, QPen, QTransform
-)
+import os
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, QScrollArea, QApplication, QStyle, QRubberBand,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QAbstractItemView
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLineEdit, QSizePolicy,
+    QCheckBox
 )
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QEvent, QPoint, Property, QSize
+from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QWheelEvent, QMouseEvent
 
-from ..core.image_loader import load_pil_image
-from .utils import pil_to_qimage
-
-# ------------------------------------------------------------
-# 썸네일 생성 워커
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# 썸네일 생성 워커 (Deprecated - Using ThreadPool in MainWindow)
-# ------------------------------------------------------------
-# (Removed unused ThumbnailWorker class)
-
-
-# ------------------------------------------------------------
-# 썸네일을 표시하는 커스텀 위젯
-# ------------------------------------------------------------
 class ThumbnailWidget(QWidget):
-    def __init__(self, file_name: str, thumb_size: int, parent: QWidget | None = None):
+    """
+    Thumbnail widget to display image and name in the grid.
+    Supports pairing (green border) and ratings (stars).
+    """
+    def __init__(self, display_text, size=160, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent;")
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.thumb_size = thumb_size
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0) # Reduced from 4 to 0 to bring text closer
-
-        # Image Label
-        self.image_label = QLabel()
-        self.image_label.setFixedSize(thumb_size, thumb_size)
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background: transparent;")
-        self.image_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self.image_label)
-
-        # Name Label
-        self.name_label = QLabel(file_name)
-        self.name_label.setAlignment(Qt.AlignCenter)
-        self.name_label.setStyleSheet("color: #E0E0E0; font-size: 9pt;")
-        self.name_label.setWordWrap(False)
-        self.name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self.name_label)
+        self._size = size
         
-        # Star Rating Label
-        self.rating_label = QLabel("")
-        self.rating_label.setAlignment(Qt.AlignCenter)
-        self.rating_label.setStyleSheet("color: #FFD700; font-size: 14pt; font-weight: bold;")
-        self.rating_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        # self.rating_label.hide() # Hide until rated
-        layout.addWidget(self.rating_label)
-
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.layout.setSpacing(2)
+        
+        self.lbl_img = QLabel(self)
+        self.lbl_img.setAlignment(Qt.AlignCenter)
+        self.lbl_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.lbl_text = QLabel(display_text, self)
+        self.lbl_text.setAlignment(Qt.AlignCenter)
+        self.lbl_text.setStyleSheet("color: white; font-size: 11px;")
+        
+        self.layout.addWidget(self.lbl_img, 1)
+        self.layout.addWidget(self.lbl_text)
+        
+        # Overlay Checkbox
+        self.checkbox = QCheckBox(self.lbl_img)
+        self.checkbox.setStyleSheet("""
+            QCheckBox::indicator {
+                width: 24px;
+                height: 24px;
+                background-color: rgba(0, 0, 0, 150);
+                border: 2px solid white;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                image: url(); /* Assuming a checkmark is rendered by OS or can be added later */
+            }
+        """)
+        self.checkbox.move(10, 10)
+        self.checkbox.hide() # Hidden by default until in selection mode or explicitly shown
+        # Click transparently triggers selection via listwidget handled in main_window instead of directly 
+        self.checkbox.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
         self.is_paired = False
+        self.rating = 0
+        self.pixmap = None
 
-    def set_rating(self, rating: int):
-        if rating > 0:
-            stars = "★" * rating
-            self.rating_label.setText(stars)
-            self.rating_label.show()
+    def sizeHint(self):
+        return QSize(self._size, self._size)
+
+    def set_pixmap(self, pixmap):
+        self.pixmap = pixmap
+        if pixmap:
+            # We must use self.size() or rely on layout to scale it. 
+            self.lbl_img.setPixmap(pixmap.scaled(self._size, self._size - 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            self.rating_label.setText("")
-            self.rating_label.hide()
-
-    def set_paired(self, paired: bool):
-        self.is_paired = paired
-        self._update_style()
-
-    def _update_style(self):
-        if self.is_paired:
-            # Green line at the bottom of the name label
-            self.name_label.setStyleSheet("color: #E0E0E0; font-size: 9pt; border-bottom: 3px solid #4CAF50; padding-bottom: 2px;")
-        else:
-            self.name_label.setStyleSheet("color: #E0E0E0; font-size: 9pt; border-bottom: none; padding-bottom: 2px;")
-
-    def set_pixmap(self, pixmap: QPixmap):
-        if pixmap is not None and not pixmap.isNull():
-            self._current_pixmap = pixmap # Store original/current source if possible? 
-            # Storing full res pixmap for every item might be heavy if we had it?
-            # Actually set_pixmap receives the processed/loaded pixmap.
-            # If we store it, we can rescale from it without quality loss relative to "loaded" quality.
+            self.lbl_img.clear()
             
-            # Use SmoothTransformation for high quality
-            scale_mode = Qt.SmoothTransformation
-            if self.thumb_size < 100: scale_mode = Qt.FastTransformation
-            
-            self.image_label.setPixmap(pixmap.scaled(
-                self.thumb_size,
-                self.thumb_size,
-                Qt.KeepAspectRatio,
-                scale_mode
-            ))
-            
-    def update_thumb_size(self, size: int):
-        self.thumb_size = size
-        self.image_label.setFixedSize(size, size)
+    def set_paired(self, is_paired):
+        self.is_paired = is_paired
+        self.update()
         
-        # Rescale current content if available to prevent "Small Image in Big Box"
-        if self.image_label.pixmap() and not self.image_label.pixmap().isNull():
-            # We rescale the *currently displayed* pixmap. 
-            # Note: This might cause blurriness if upscaling significantly, 
-            # but it maintains layout until the high-res reload kicks in.
-            # Ideally we'd store the source pixmap, but we can just use the label's pixmap for now.
-            # Wait, label.pixmap() returns the scaled version.
-            # If we scale up from that, it gets blurry. That's fine for transition.
+    def set_selected(self, is_selected):
+        self.checkbox.setChecked(is_selected)
+        
+    def show_checkbox(self, show):
+        if show:
+            self.checkbox.show()
+        else:
+            self.checkbox.hide()
+        
+    def set_rating(self, rating):
+        self.rating = rating
+        self.update()
+        
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw border for paired items
+        if self.is_paired:
+            pen = QPen(QColor("#4CAF50"), 2)
+            painter.setPen(pen)
+            painter.drawRect(1, 1, self.width()-2, self.height()-2)
             
-            current = self.image_label.pixmap()
-            self.image_label.setPixmap(current.scaled(
-                size,
-                size,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            ))
+        # Draw rating stars
+        if self.rating > 0:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#FFD700")) # Gold stars
+            star_size = 8
+            padding = 2
+            start_x = self.width() - (self.rating * (star_size + padding)) - 5
+            start_y = 5
+            for i in range(self.rating):
+                painter.drawEllipse(start_x + i*(star_size+padding), start_y, star_size, star_size)
 
-
-# ------------------------------------------------------------
-# 드롭용 라벨
-# ------------------------------------------------------------
-class DropLabel(QLabel):
-    def __init__(self, text: str, main_window, target_index: int, parent=None):
-        super().__init__(text, parent)
-        self.main_window = main_window
-        self.target_index = target_index
-        self.setAcceptDrops(True)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet(
-            """
-            QLabel {
-                border: 2px dashed #666666;
-                border-radius: 6px;
-                padding: 8px;
-                color: #E0E0E0;
-                background-color: #3A3A3A;
-            }
-            QLabel:hover {
-                background-color: #444444;
-            }
-            """
-        )
-
-    def dragEnterEvent(self, event):
-        event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        self.main_window.move_selected_to_target(self.target_index)
-        event.acceptProposedAction()
-
-
-# ------------------------------------------------------------
-# 개선된 리스트 위젯 (sqs.py 기반)
-# ------------------------------------------------------------
 class ImageListWidget(QListWidget):
-    clicked_with_modifiers = Signal(QListWidgetItem, Qt.KeyboardModifiers)
+    """
+    Custom QListWidget to handle Ctrl+Scroll zooming and specialized double clicks.
+    """
     thumbSizeChanged = Signal(int)
     doubleClickedLeft = Signal(QListWidgetItem)
     doubleClickedRight = Signal(QListWidgetItem)
-
+    clicked_with_modifiers = Signal(QListWidgetItem, Qt.KeyboardModifiers)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._thumb_size = 300
+        self._thumb_size = 160
         self._grid_padding_w = 20
-        self._grid_padding_h = 50
-        self._drag_start_pos: QPoint | None = None
-        self._rubber_band: QRubberBand | None = None
-        self._rubber_start_pos: QPoint | None = None
+        self._grid_padding_h = 40
+        self.setMouseTracking(True)
+        self.viewport().installEventFilter(self)
         
-        # Optimize Scrolling (User Request: Scroll was too jumpy)
-        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.setUniformItemSizes(True) # Better performance for fixed size grids
-
-        # Resize Throttling
-        self._target_thumb_size = self._thumb_size
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(100) # 100ms delay
-        self._resize_timer.timeout.connect(self._apply_delayed_resize)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            if hasattr(event, 'position'):
-                pos = event.position().toPoint()
-            else:
-                pos = QPoint(event.x(), event.y())
+    def eventFilter(self, source, event):
+        if source == self.viewport() and event.type() == QEvent.Wheel:
+            if event.modifiers() == Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self._thumb_size = min(600, self._thumb_size + 20)
+                else:
+                    self._thumb_size = max(80, self._thumb_size - 20)
+                self.thumbSizeChanged.emit(self._thumb_size)
+                return True
+        return super().eventFilter(source, event)
             
-            item = self.itemAt(pos)
-            
-            # Logic Separation:
-            # Item Clicked -> Potential Drag (No RubberBand)
-            # Empty Space -> Potential RubberBand (No Drag)
-            if item is not None:
-                self._drag_start_pos = pos
-                self._rubber_start_pos = None
-            else:
-                self._drag_start_pos = None
-                self._rubber_start_pos = pos
-                # Optional: Clear selection on background click if control not pressed
-                if not (event.modifiers() & Qt.ControlModifier):
-                    self.clearSelection()
-
-        if hasattr(event, 'position'):
-            pos_for_mod = event.position().toPoint()
-        else:
-            pos_for_mod = QPoint(event.x(), event.y())
-
-        item = self.itemAt(pos_for_mod)
-        if item is not None:
-            self.clicked_with_modifiers.emit(item, event.modifiers())
-        super().mousePressEvent(event)
-
-    def keyPressEvent(self, event):
-        key = event.key()
-        if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-            count = self.count()
-            if count == 0: return
-            current = self.currentRow()
-            if current < 0: current = 0
-            
-            try:
-                grid_w = self.gridSize().width()
-            except Exception:
-                grid_w = self._thumb_size + self._grid_padding_w
-            
-            viewport_width = self.viewport().width()
-            columns = max(1, viewport_width // grid_w)
-            new_index = current
-            
-            if key == Qt.Key_Left: new_index = max(0, current - 1)
-            elif key == Qt.Key_Right: new_index = min(count - 1, current + 1)
-            elif key == Qt.Key_Up: new_index = max(0, current - columns)
-            elif key == Qt.Key_Down: new_index = min(count - 1, current + columns)
-            
-            if new_index != current:
-                item = self.item(new_index)
-                if item:
-                    self.setCurrentRow(new_index)
-                    self.clearSelection()
-                    item.setSelected(True)
-                    self.clicked_with_modifiers.emit(item, Qt.NoModifier)
-                self.scrollToItem(self.item(new_index))
-            return
-
-        if key in (Qt.Key_Return, Qt.Key_Enter):
-            current = self.currentRow()
-            if current >= 0:
-                item = self.item(current)
-                if item:
-                    self.clicked_with_modifiers.emit(item, event.modifiers())
-            return
-
-        # Let parent handle numbers 1, 2
-        if key in (Qt.Key_1, Qt.Key_2):
-            event.ignore()
-            return
-
-        super().keyPressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        current_pos = event.position().toPoint() if hasattr(event, 'position') else QPoint(event.x(), event.y())
-
-        # Drag start logic
-        if self._drag_start_pos is not None:
-            # Increase threshold to prevent accidental drags (User Request)
-            threshold = max(QApplication.startDragDistance(), 20) 
-            if (current_pos - self._drag_start_pos).manhattanLength() >= threshold:
-                start_item = self.itemAt(self._drag_start_pos)
-                if start_item is not None and start_item.isSelected():
-                    if self._rubber_band is not None:
-                        self._rubber_band.hide()
-                        self._rubber_band = None
-                    self.startDrag(Qt.MoveAction)
-                    self._drag_start_pos = None
-                    return
-
-        # Rubber band logic
-        if self._rubber_start_pos is not None:
-            if self._rubber_band is None:
-                self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
-                self._rubber_band.setStyleSheet("border: 2px dashed #4CAF50; background-color: rgba(76, 175, 80, 80);")
-                self._rubber_band.show()
-                self._rubber_band.raise_()
-            
-            rect = QRect(self._rubber_start_pos, current_pos).normalized()
-            self._rubber_band.setGeometry(rect)
-            return
-
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_start_pos = None
-            if self._rubber_band is not None and self._rubber_start_pos is not None:
-                selection_rect = self._rubber_band.geometry()
-                self._rubber_band.hide()
-                self._rubber_band.deleteLater()
-                self._rubber_band = None
-
-                modifiers = event.modifiers()
-                if not (modifiers & Qt.ControlModifier):
-                    self.clearSelection()
-
-                for i in range(self.count()):
-                    item = self.item(i)
-                    if selection_rect.intersects(self.visualItemRect(item)):
-                        item.setSelected(True)
-                
-                self._rubber_start_pos = None
-                return
-        super().mouseReleaseEvent(event)
-
-    def wheelEvent(self, event):
-        if event.modifiers() & Qt.ControlModifier:
-            delta_y = event.angleDelta().y()
-            if delta_y == 0: return
-
-            factor = 1.1 if delta_y > 0 else 0.9
-            new_size = int(self._target_thumb_size * factor)
-            new_size = max(80, min(5000, new_size))
-            
-            self._target_thumb_size = new_size
-            
-            # Update Grid Size immediately for responsiveness (lightweight)
-            grid_w = new_size + self._grid_padding_w
-            grid_h = new_size + self._grid_padding_h
-            self.setGridSize(QSize(grid_w, grid_h))
-            
-            # Debounce expensive content resize
-            self._resize_timer.start()
-            
-            event.accept()
-        else:
-            # User Request: "Too jumpy" -> Reduce sensitivity manually
-            # Standard mouse wheel delta is 120.
-            # Let's scroll fewer pixels per tick (e.g. 40px)
-            delta = event.angleDelta().y()
-            if delta == 0: return
-            
-            # Factor: 0.5 means 60px move per click (if delta is 120)
-            # Adjust '0.4' to make it smoother/slower as requested
-            step = -int(delta * 0.4) 
-            
-            sb = self.verticalScrollBar()
-            sb.setValue(sb.value() + step)
-            event.accept()
-
-    def mouseDoubleClickEvent(self, event):
-        if hasattr(event, 'position'):
-            pos = event.position().toPoint()
-        else:
-            pos = QPoint(event.x(), event.y())
-        
-        item = self.itemAt(pos)
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        item = self.itemAt(event.pos())
         if item:
             if event.button() == Qt.LeftButton:
                 self.doubleClickedLeft.emit(item)
             elif event.button() == Qt.RightButton:
                 self.doubleClickedRight.emit(item)
         super().mouseDoubleClickEvent(event)
-
-    def set_thumb_size(self, size: int):
-        self._thumb_size = size
-        self._target_thumb_size = size
-        self._apply_delayed_resize()
-
-    def _apply_delayed_resize(self):
-        # Commit the target size
-        self._thumb_size = self._target_thumb_size
         
-        icon_size = QSize(self._thumb_size, self._thumb_size)
-        grid_w = self._thumb_size + self._grid_padding_w
-        grid_h = self._thumb_size + self._grid_padding_h
-        
-        self.setIconSize(icon_size)
-        self.setGridSize(QSize(grid_w, grid_h))
-
-        # Expensive loop (run only once after scrolling stops)
-        for i in range(self.count()):
-            item = self.item(i)
-            widget = self.itemWidget(item)
-            if isinstance(widget, ThumbnailWidget):
-                widget.update_thumb_size(self._thumb_size)
-            item.setSizeHint(QSize(grid_w, grid_h))
-            
-        self.thumbSizeChanged.emit(self._thumb_size)
-
-    def startDrag(self, supportedActions):
-        items = self.selectedItems()
-        if not items: return
-        drag = QDrag(self)
-        mime = self.mimeData(items)
-        drag.setMimeData(mime)
-
-        size = self.iconSize()
-        pixmap = QPixmap(size)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        
-        # Draw first item
-        widget = self.itemWidget(items[0])
-        if widget and hasattr(widget, 'image_label') and widget.image_label.pixmap():
-            scaled = widget.image_label.pixmap().scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = (size.width() - scaled.width()) // 2
-            y = (size.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-
-        if len(items) > 1:
-            painter.fillRect(pixmap.rect(), QColor(0,0,0,128))
-            painter.setPen(QPen(Qt.white))
-            painter.drawText(pixmap.rect(), Qt.AlignCenter, str(len(items)))
-        painter.end()
-
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(QPoint(size.width()//2, size.height()))
-        drag.exec(Qt.MoveAction)
-
-
-# ------------------------------------------------------------
-# 패닝 + Ctrl+휠 줌 가능한 스크롤 영역
-# ------------------------------------------------------------
-class PannableScrollArea(QScrollArea):
-    def __init__(self, zoom_callback=None, parent=None):
-        super().__init__(parent)
-        self._dragging = False
-        self._last_pos = None
-        self._zoom_callback = zoom_callback
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._dragging = True
-            if hasattr(event, 'position'):
-                self._last_pos = event.position().toPoint()
-            else:
-                self._last_pos = QPoint(event.x(), event.y())
-            self.setCursor(Qt.ClosedHandCursor)
+    def mousePressEvent(self, event: QMouseEvent):
         super().mousePressEvent(event)
+        item = self.itemAt(event.pos())
+        if item and event.modifiers() != Qt.NoModifier:
+            self.clicked_with_modifiers.emit(item, event.modifiers())
 
-    def mouseMoveEvent(self, event):
-        if self._dragging and self._last_pos is not None:
-            if hasattr(event, 'position'):
-                current_pos = event.position().toPoint()
-            else:
-                current_pos = QPoint(event.x(), event.y())
-            delta = current_pos - self._last_pos
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
-            self._last_pos = current_pos
-        super().mouseMoveEvent(event)
+class DropLabel(QLabel):
+    """
+    A QLabel that accepts drag-and-drop operations for files/folders.
+    """
+    dropped = Signal(int, list)
+    
+    def __init__(self, text, parent=None, target_id=0):
+        super().__init__(text, parent)
+        self.target_id = target_id
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        self.setAcceptDrops(True)
+        
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.setStyleSheet("background-color: #4CAF50; color: white; border: 2px dashed #fff; border-radius: 5px;")
+            
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        
+    def dropEvent(self, event):
+        self.setStyleSheet("background-color: #333; color: #ccc; border: 2px dashed #555; border-radius: 5px;")
+        urls = event.mimeData().urls()
+        paths = [url.toLocalFile() for url in urls if url.isLocalFile()]
+        if paths:
+            self.dropped.emit(self.target_id, paths)
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._dragging = False
-            self.setCursor(Qt.ArrowCursor)
-        super().mouseReleaseEvent(event)
-
-    def wheelEvent(self, event):
-        if self._zoom_callback is not None:
-            delta = event.angleDelta().y()
-            if delta == 0: return
-            steps = delta / 120.0
-            self._zoom_callback(steps)
-            event.accept()
-        else:
-            super().wheelEvent(event)
-
-# ------------------------------------------------------------
-# GPU 가속 이미지 위젯 (QGraphicsView + OpenGL Viewport)
-# ------------------------------------------------------------
 class GPUImageWidget(QGraphicsView):
-    # Signals for Sync
+    """
+    High-performance image viewer using QGraphicsView.
+    Emits pan/zoom events to sync with other views.
+    """
+    keyPressed = Signal(QEvent)
+    scrollChanged = Signal(float, float)
     zoomChanged = Signal(float)
-    scrollChanged = Signal(float, float) # x_pct, y_pct
-
+    
     def __init__(self, parent=None):
         super().__init__(parent)
-        
-        # GPU Viewport (Hardware Acceleration)
-        # Note: If experiencing lag, try commenting this out to use software rendering
-        # User reported lag -> Switching to Software Raster (often smoother for 2D Pan/Zoom on Windows)
-        # self.setViewport(QOpenGLWidget())
-        
-        # Scene
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene.addItem(self.pixmap_item)
         
-        # Optimization Flags
-        self.setRenderHint(QPainter.Antialiasing, False)
-        self.setRenderHint(QPainter.SmoothPixmapTransform, False) # Bilinear is slow on CPU? Let's keep it off for speed for now.
-        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
-        self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
-        
-        # UX: Anchor Under Mouse (CRITICAL for User Request "Zoom at Mouse Position")
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
+        self.setBackgroundBrush(QBrush(QColor("#1e1e1e")))
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setFrameShape(QGraphicsView.NoFrame)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         
-        # Hide scrollbars for cleaner look (User can pan with mouse drag)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.zoom_factor = 1.0
         
-        self.setStyleSheet("background: transparent; border: none;")
-        self._current_zoom = 1.0
-        self._syncing = False
-        self._last_scroll_time = 0
-
-        # Connect Scrollbars for Sync Signal
-        self.horizontalScrollBar().valueChanged.connect(self._emit_scroll)
-        self.verticalScrollBar().valueChanged.connect(self._emit_scroll)
-
-    def _emit_scroll(self, force=False):
-        if self._syncing: return
-        
-        # Throttle (e.g. max 60fps ~ 16ms)
-        import time
-        now = time.time() * 1000
-        if not force and now - self._last_scroll_time < 16:
-            return
-        self._last_scroll_time = now
-
-        # Calculate percentage
-        h = self.horizontalScrollBar()
-        v = self.verticalScrollBar()
-        
-        x_pct = h.value() / h.maximum() if h.maximum() > 0 else 0
-        y_pct = v.value() / v.maximum() if v.maximum() > 0 else 0
-        
-        self.scrollChanged.emit(x_pct, y_pct)
-
-    def set_scroll_pct(self, x_pct, y_pct):
-        self._syncing = True
-        h = self.horizontalScrollBar()
-        v = self.verticalScrollBar()
-        
-        if h.maximum() > 0:
-            h.setValue(int(x_pct * h.maximum()))
-        if v.maximum() > 0:
-            v.setValue(int(y_pct * v.maximum()))
-        self._syncing = False
-
-    def set_pixmap(self, pixmap: QPixmap | None):
-        if pixmap is None:
+    def set_pixmap(self, pixmap):
+        if pixmap:
+            self.pixmap_item.setPixmap(pixmap)
+            self.setSceneRect(self.pixmap_item.boundingRect())
+            # Only auto-fit if not user-zoomed
+            if self.zoom_factor == 1.0:
+                self.resetTransform()
+                self.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+        else:
             self.pixmap_item.setPixmap(QPixmap())
-            return
-            
-        self.pixmap_item.setPixmap(pixmap)
-        self.scene.setSceneRect(self.pixmap_item.boundingRect())
-        self.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
-        # Capture the actual scale applied by fitInView
-        self._current_zoom = self.transform().m11()
-
-    def wheelEvent(self, event):
-        # Zoom Logic
-        # Standard Wheel Zoom
-        delta = event.angleDelta().y()
-        if delta == 0: return
-        
-        factor = 1.1 if delta > 0 else 0.9
-        
-        self.scale(factor, factor)
-        
-        # Update internal state with REAL scale
-        self._current_zoom = self.transform().m11()
-        
-        if not self._syncing:
-             self.zoomChanged.emit(self._current_zoom)
-             # Force scroll sync immediately because wheel zoom (AnchorUnderMouse) changes scroll position
-             self._emit_scroll(force=True)
-        
-        event.accept()
-
-    def set_zoom(self, value: int):
-        # value is 10 to 300 (percentage)
-        # Check current scale
-        current_level = self.transform().m11()
-        target_level = value / 100.0
-        
-        if current_level == 0: return
-
-        # Apply relative scale
-        ratio = target_level / current_level
-        self.scale(ratio, ratio)
-        
-        self._current_zoom = target_level
     
+    def reset_zoom_to_fit(self):
+        """Reset zoom to fit and update state."""
+        self.zoom_factor = 1.0
+        self.resetTransform()
+        if self.pixmap_item.pixmap() and not self.pixmap_item.pixmap().isNull():
+            self.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+            
+    def wheelEvent(self, event):
+        if event.modifiers() == Qt.ControlModifier:
+            zoom_in = event.angleDelta().y() > 0
+            factor = 1.15 if zoom_in else 1 / 1.15
+            new_zoom = self.zoom_factor * factor
+            # Clamp zoom range
+            if 0.1 <= new_zoom <= 10.0:
+                self.zoom_factor = new_zoom
+                self.scale(factor, factor)
+                self.zoomChanged.emit(self.zoom_factor)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+            
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        x = hbar.value() / max(1, hbar.maximum())
+        y = vbar.value() / max(1, vbar.maximum())
+        self.scrollChanged.emit(x, y)
+        
+    def get_view_state(self):
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        return {
+            'zoom': self.zoom_factor,
+            'x_ratio': hbar.value() / max(1, hbar.maximum()),
+            'y_ratio': vbar.value() / max(1, vbar.maximum())
+        }
+        
+    def restore_view_state(self, state):
+        if not state: return
+        self.zoom_factor = state.get('zoom', 1.0)
+        self.setTransform(self.transform().fromScale(self.zoom_factor, self.zoom_factor))
+        
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        hbar.setValue(int(state.get('x_ratio', 0) * hbar.maximum()))
+        vbar.setValue(int(state.get('y_ratio', 0) * vbar.maximum()))
+        
+    def set_scroll_pct(self, x_pct, y_pct):
+        """Set scroll position by percentage (0.0-1.0) for sync with other views."""
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        hbar.setValue(int(x_pct * max(1, hbar.maximum())))
+        vbar.setValue(int(y_pct * max(1, vbar.maximum())))
+
     def set_zoom_factor(self, factor):
-        # Sync Helper to match exact zoom factor from another widget
-        self._syncing = True
+        """Set zoom factor and apply transform for sync with other views."""
+        if abs(self.zoom_factor - factor) < 0.001:
+            return
+        self.zoom_factor = factor
+        self.resetTransform()
+        self.scale(factor, factor)
+
+    def keyPressEvent(self, event):
+        self.keyPressed.emit(event)
+        super().keyPressEvent(event)
+
+class ProSliderWidget(QWidget):
+    """
+    Custom premium slider widget matching professional photo editors.
+    Features: smooth animations, double click to reset, and text-input toggling.
+    """
+    valueChanged = Signal(int)
+    sliderPressed = Signal()
+    sliderReleased = Signal()
+    
+    def __init__(self, name, min_val=-100, max_val=100, default_val=0, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(30)
         
-        # User Feedback: "Common Zoom not working properly"
-        # Fix: Switch anchor to ViewCenter during programmatic zoom to prevent jumping 
-        # based on arbitrary mouse position in the target widget.
-        old_anchor = self.transformationAnchor()
-        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+        self.name = name
+        self._min = min_val
+        self._max = max_val
+        self._default = default_val
+        self._value = default_val
         
-        current_level = self.transform().m11()
-        if current_level > 0:
-            ratio = factor / current_level
-            self.scale(ratio, ratio)
-            self._current_zoom = factor
+        self._hovered = False
+        self._pressed = False
+        self._handle_radius = 6
+        self._hover_radius = 6
         
-        # Restore Anchor
-        self.setTransformationAnchor(old_anchor)
-        self._syncing = False
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.lbl_name = QLabel(name)
+        self.lbl_name.setFixedWidth(70)
+        self.lbl_name.setStyleSheet("font-size: 11px; color: #bbbbbb; font-weight: bold;")
+        self.lbl_name.mouseDoubleClickEvent = self._on_label_double_click
+        
+        self.slider_area = QWidget()
+        self.slider_area.setMouseTracking(True)
+        self.slider_area.installEventFilter(self)
+        
+        self.lbl_val = QLabel(str(default_val))
+        self.lbl_val.setFixedWidth(35)
+        self.lbl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_val.setStyleSheet("font-size: 11px; color: #ffffff;")
+        self.lbl_val.mousePressEvent = self._on_val_click
+        self.lbl_val.mouseDoubleClickEvent = self._on_label_double_click
+        
+        self.edit_val = QLineEdit()
+        self.edit_val.setFixedWidth(35)
+        self.edit_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.edit_val.setStyleSheet("background: #333; color: white; border: 1px solid #555; border-radius: 2px; font-size: 11px;")
+        self.edit_val.hide()
+        self.edit_val.returnPressed.connect(self._on_edit_finish)
+        self.edit_val.editingFinished.connect(self._on_edit_finish)
+        
+        self.layout.addWidget(self.lbl_name)
+        self.layout.addWidget(self.slider_area, 1)
+        self.layout.addWidget(self.lbl_val)
+        self.layout.addWidget(self.edit_val)
+        
+        self.anim_val = QPropertyAnimation(self, b"anim_value")
+        self.anim_val.setDuration(250)
+        self.anim_val.setEasingCurve(QEasingCurve.OutCubic)
+        
+        self.anim_hover = QPropertyAnimation(self, b"hover_radius")
+        self.anim_hover.setDuration(150)
+
+    @Property(float)
+    def anim_value(self):
+        return self._value
+        
+    @anim_value.setter
+    def anim_value(self, val):
+        self._set_value_internal(int(round(val)))
+
+    @Property(float)
+    def hover_radius(self):
+        return self._hover_radius
+        
+    @hover_radius.setter
+    def hover_radius(self, val):
+        self._hover_radius = val
+        self.slider_area.update()
+
+    def value(self):
+        return self._value
+        
+    def setValue(self, val):
+        self.anim_val.stop()
+        self._set_value_internal(val)
+        
+    def _set_value_internal(self, val):
+        val = max(self._min, min(self._max, val))
+        if self._value != val:
+            self._value = val
+            self.lbl_val.setText(str(val))
+            self.slider_area.update()
+            self.valueChanged.emit(val)
+
+    def _on_label_double_click(self, event):
+        self._reset_to_default()
+
+    def _reset_to_default(self):
+        if self._value == self._default:
+            return
+        self.anim_val.stop()
+        self.anim_val.setStartValue(self._value)
+        self.anim_val.setEndValue(self._default)
+        self.anim_val.start()
+
+    def _on_val_click(self, event):
+        if event.button() == Qt.LeftButton:
+            self.lbl_val.hide()
+            self.edit_val.setText(str(self._value))
+            self.edit_val.show()
+            self.edit_val.setFocus()
+            self.edit_val.selectAll()
+
+    def _on_edit_finish(self):
+        try:
+            val = int(self.edit_val.text())
+        except ValueError:
+            val = self._value
+            
+        self.edit_val.hide()
+        self.lbl_val.show()
+        self.setValue(val)
+
+    def eventFilter(self, obj, event):
+        if obj == self.slider_area:
+            if event.type() == QEvent.Paint:
+                self._paint_slider()
+                return True
+            elif event.type() == QEvent.Enter:
+                self._hovered = True
+                self.anim_hover.stop()
+                self.anim_hover.setStartValue(self._hover_radius)
+                self.anim_hover.setEndValue(8.0)
+                self.anim_hover.start()
+            elif event.type() == QEvent.Leave:
+                self._hovered = False
+                self.anim_hover.stop()
+                self.anim_hover.setStartValue(self._hover_radius)
+                self.anim_hover.setEndValue(6.0)
+                self.anim_hover.start()
+            elif event.type() == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self._pressed = True
+                    self.sliderPressed.emit()
+                    self._update_value_from_pos(event.pos())
+            elif event.type() == QEvent.MouseMove:
+                if self._pressed:
+                    self._update_value_from_pos(event.pos())
+            elif event.type() == QEvent.MouseButtonRelease:
+                if event.button() == Qt.LeftButton:
+                    self._pressed = False
+                    self.sliderReleased.emit()
+            elif event.type() == QEvent.MouseButtonDblClick:
+                if event.button() == Qt.LeftButton:
+                    self._reset_to_default()
+                    
+        return super().eventFilter(obj, event)
+
+    def _update_value_from_pos(self, pos):
+        w = self.slider_area.width()
+        margin = 10
+        eff_w = w - (margin * 2)
+        if eff_w <= 0: return
+        
+        x = pos.x() - margin
+        ratio = max(0.0, min(1.0, x / eff_w))
+        
+        val = self._min + ratio * (self._max - self._min)
+        self.setValue(int(round(val)))
+
+    def _paint_slider(self):
+        painter = QPainter(self.slider_area)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        w = self.slider_area.width()
+        h = self.slider_area.height()
+        margin = 10
+        eff_w = w - (margin * 2)
+        
+        cy = h / 2
+        
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#333333"))
+        painter.drawRoundedRect(margin, cy - 2, eff_w, 4, 2, 2)
+        
+        ratio = (self._value - self._min) / (self._max - self._min)
+        hx = margin + ratio * eff_w
+        
+        zero_ratio = (0 - self._min) / (self._max - self._min)
+        zx = margin + zero_ratio * eff_w
+        
+        fill_x = min(zx, hx)
+        fill_w = abs(hx - zx)
+        if fill_w > 0:
+            painter.setBrush(QColor("#4CAF50"))
+            painter.drawRoundedRect(int(fill_x), int(cy - 2), int(fill_w), 4, 2, 2)
+            
+        painter.setBrush(QColor("#777777"))
+        painter.drawEllipse(QPoint(int(zx), int(cy)), 3, 3)
+            
+        painter.setBrush(QColor("#FFFFFF") if self._hovered or self._pressed else QColor("#CCCCCC"))
+        r = int(self._hover_radius)
+        painter.drawEllipse(QPoint(int(hx), int(cy)), r, r)
+        
+        painter.end()

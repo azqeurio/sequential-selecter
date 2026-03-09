@@ -34,9 +34,7 @@ def load_pil_image(path: Path, max_size: int | None = None) -> Image.Image | Non
                         # RESOLUTION CHECK: Discard thumb if too small
                         if img is not None and max_size is not None:
                              w, h = img.size
-                             # If thumb is significantly smaller than requested, fallback
                              if max(w, h) < max_size:
-                                 print(f"DEBUG: Discarding thumb {w}x{h} for max_size {max_size}")
                                  img = None 
                     except Exception:
                         pass
@@ -45,31 +43,27 @@ def load_pil_image(path: Path, max_size: int | None = None) -> Image.Image | Non
                     if img is None:
                         # Adaptive Quality: Use half_size only if sufficient
                         # Typical RAW is ~6000px. Half is ~3000px.
-                        # If max_size > 3000, we need full size.
                         use_half = True
                         if max_size is not None and max_size > 3000:
                             use_half = False
                         
-                        print(f"DEBUG: Postprocessing RAW. MaxSize: {max_size}, Half: {use_half}")
                         img = Image.fromarray(raw.postprocess(
                             use_camera_wb=True,
                             no_auto_bright=True,
-                            bright=1.0, # Default brightness
+                            bright=1.0,
                             user_sat=None,
                             output_bps=8,
                             half_size=use_half
                         ))
-            except Exception as e:
-                print(f"RAW load failed for {path}: {e}")
+            except Exception:
                 pass
 
         # 3. Standard Formats (JPG, PNG, WebP...)
         else:
             img = Image.open(str(path))
-            # Force load to check for integrity
             img.load() 
 
-        # 4. Final Fallback (Try opening as standard image if not touched yet)
+        # 4. Final Fallback
         if img is None:
             img = Image.open(str(path))
             img.load()
@@ -80,20 +74,13 @@ def load_pil_image(path: Path, max_size: int | None = None) -> Image.Image | Non
         except Exception:
             pass
 
-        # Resize for Thumbnail (Lanczos for quality, but considering speed)
-        # If max_size is small, we can use Bilinear for speed during scroll
+        # Resize for Thumbnail
         if max_size is not None and img is not None:
-            # Aspect Ratio Calculation
             w, h = img.size
             if w > max_size or h > max_size:
-                # Use thumbnail() method which modifies in-place
-                # Image.BILINEAR is significantly faster than BICUBIC/LANCZOS with acceptable quality for thumbnails
-                img.thumbnail((max_size, max_size), Image.BILINEAR)
+                img.thumbnail((max_size, max_size), Image.LANCZOS)
                 
-    except Exception as e:
-        print(f"Error loading {path.name}: {e}")
+    except Exception:
         return None
 
-    if img:
-        print(f"DEBUG: Loaded {path.name}, Size: {img.size}")
     return img

@@ -10,113 +10,110 @@
 DARK_STYLE = """
 /* Global Reset */
 QMainWindow {
-    background-color: #1e1e1e;
-    color: #cccccc;
+    background-color: #121212; /* Darker background to let panels stand out */
+    color: #e0e0e0;
 }
 QWidget {
-    background-color: #1e1e1e;
-    color: #cccccc;
-    font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
+    font-family: '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Malgun Gothic', sans-serif;
     font-size: 10pt;
+    color: #e0e0e0;
 }
 
-/* --- Buttons (VS Code Style Shape + Green Accent) --- */
-/* Default (Tonal/Secondary) - Targets, Lang, Donate */
+/* --- Buttons (macOS / Liquid Glass Style) --- */
 QPushButton {
-    background-color: #3b3b3b;
-    color: #ffffff;
-    border: 1px solid #3b3b3b;
-    border-radius: 4px; /* VS Code Shape */
-    padding: 6px 12px;
-    font-weight: normal;
-    text-align: center;
+    background-color: rgba(60, 60, 60, 0.4); /* Translucent */
+    color: #f0f0f0;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px; /* Softer, rounder */
+    padding: 6px 14px;
+    font-weight: 500;
 }
 QPushButton:hover {
-    background-color: #454545;
-    border-color: #454545;
+    background-color: rgba(80, 80, 80, 0.6);
+    border-color: rgba(255, 255, 255, 0.2);
 }
 QPushButton:pressed {
-    background-color: #2D2D2D;
+    background-color: rgba(40, 40, 40, 0.8);
 }
 
-/* Primary Button (Green) - Organize */
+/* Primary Button */
 QPushButton:checked {
-    background-color: #2E7D32; /* Green */
-    border-color: #2E7D32;
+    background-color: rgba(46, 125, 50, 0.8); /* Translucent Green */
+    border-color: rgba(76, 175, 80, 0.5);
     color: white;
 }
 QPushButton#PrimaryButton {
-    background-color: #2E7D32; /* Green */
-    border: 1px solid #2E7D32;
+    background-color: rgba(46, 125, 50, 0.7);
+    border: 1px solid rgba(76, 175, 80, 0.4);
 }
 QPushButton#PrimaryButton:hover {
-    background-color: #388E3C;
+    background-color: rgba(56, 142, 60, 0.9);
 }
 
 /* Tonal / Ghost Buttons */
 QPushButton#TonalButton {
     background-color: transparent;
     border: 1px solid transparent;
-    color: #cccccc;
+    color: #d0d0d0;
 }
 QPushButton#TonalButton:hover {
-    background-color: #2a2d2e;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
     color: #ffffff;
 }
 
-/* Image Folder Button -> Standard VS Code Input look but with Green Accent if requested? 
-   User said "Color highlights keep". Originally this was Title Green. 
-   Let's make it a Primary Green Button but with text-align left for path visibility.
-*/
+/* Folder Selection */
 QPushButton#SelectFolderBtn {
-    background-color: #2E7D32; /* Green */
-    border: 1px solid #1B5E20;
-    border-radius: 4px;
+    background-color: rgba(46, 125, 50, 0.6); 
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
     text-align: left;
-    padding-left: 10px;
+    padding-left: 12px;
     color: #ffffff;
 }
 QPushButton#SelectFolderBtn:hover {
-    background-color: #388E3C;
+    background-color: rgba(56, 142, 60, 0.8);
 }
 
 /* --- List Widget --- */
 QListWidget {
-    background-color: #252526;
-    border: 1px solid #454545;
-    border-radius: 0px;
+    background-color: transparent; /* Let the glass panel behind it show */
+    border: none;
     outline: none;
 }
 QListWidget::item {
-    border-radius: 3px;
+    border-radius: 6px;
     padding: 4px;
-    color: #cccccc;
+    color: #e0e0e0;
 }
 QListWidget::item:hover {
-    background-color: #2a2d2e;
+    background-color: rgba(255, 255, 255, 0.08); /* Soft highlight */
 }
 QListWidget::item:selected {
-    background-color: rgba(46, 125, 50, 0.3); /* Green Low Opacity */
-    border: 1px solid #4CAF50; /* Green Border */
+    background-color: rgba(76, 175, 80, 0.3); /* Soft Green */
+    border: 1px solid rgba(76, 175, 80, 0.6);
     color: #ffffff;
 }
 
 /* --- Scrollbar --- */
 QScrollBar:vertical {
-    background: #1e1e1e;
-    width: 10px;
+    background: transparent;
+    width: 12px;
     margin: 0;
 }
 QScrollBar::handle:vertical {
-    background: #424242;
-    min-height: 20px;
-    border-radius: 5px;
+    background: rgba(120, 120, 120, 0.4); /* Translucent handle */
+    min-height: 24px;
+    border-radius: 6px;
     margin: 2px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #4f4f4f;
+    background: rgba(150, 150, 150, 0.6);
 }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+    border: none;
     height: 0px;
 }
 
@@ -124,34 +121,35 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QSlider::groove:horizontal {
     border: none;
     height: 4px;
-    background: #3c3c3c;
+    background: rgba(255, 255, 255, 0.1);
     border-radius: 2px;
 }
 QSlider::handle:horizontal {
-    background: #cccccc;
-    width: 12px;
-    height: 12px;
-    margin: -4px 0;
-    border-radius: 6px;
+    background: #e0e0e0;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
 }
 QSlider::sub-page:horizontal {
-    background: #4CAF50; /* Green */
+    background: rgba(76, 175, 80, 0.8);
     border-radius: 2px;
 }
 
-/* --- Panel & Overlay --- */
-QFrame#glassPanel {
-    background-color: #252526;
-    border: 1px solid #454545;
-    border-radius: 6px;
+/* --- Glass Panel & Overlay --- */
+QFrame#glassPanel, QWidget#glassPanel {
+    background-color: rgba(30, 30, 32, 0.65); /* Deep translucent */
+    border: 1px solid rgba(255, 255, 255, 0.08); /* Frosted edge */
+    border-radius: 12px; /* Smooth corners */
 }
 QRubberBand {
-    border: 1px solid #4CAF50; /* Green */
+    border: 1px solid rgba(76, 175, 80, 0.8);
     background-color: rgba(76, 175, 80, 0.2);
+    border-radius: 2px;
 }
 
 QLabel {
-    color: #cccccc;
+    color: #e0e0e0;
 }
 """
 

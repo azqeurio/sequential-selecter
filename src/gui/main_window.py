@@ -28,11 +28,13 @@ from ..core.file_worker import FileOperationWorker
 from .utils import pil_to_qimage
 from .widgets import ThumbnailWidget, DropLabel, ImageListWidget, GPUImageWidget
 from .organizer_dialog import OrganizerWidget
-from .organizer_dialog import OrganizerWidget
 from .filter_dialog import FilterDialog
 from .viewer_widget import FullViewerWidget
+from .exif_editor import ExifEditorWidget
+from .photo_editor import PhotoEditorWidget
 from .styles import DARK_STYLE
 from ..core.rating_manager import RatingManager, get_image_metadata
+from ..i18n.translations import TRANSLATIONS
 
 SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.heic', '.heif', '.arw', '.cr2', '.cr3', '.nef', '.rw2', '.orf', '.raf', '.dng'}
 RAW_EXT = {'.arw', '.cr2', '.cr3', '.nef', '.rw2', '.orf', '.raf', '.dng'}
@@ -44,7 +46,6 @@ class GridSelectorWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("시퀀셜 셀럭터")
         self.setWindowTitle("시퀀셜 셀럭터")
         try:
             # PyInstaller support
@@ -58,6 +59,9 @@ class GridSelectorWindow(QMainWindow):
                 self.setWindowIcon(QIcon(str(icon_path)))
         except Exception:
             pass
+            
+        # UI Fade Animation Tracker
+        self._current_animation = None
             
         self.resize(1400, 850)
 
@@ -78,29 +82,16 @@ class GridSelectorWindow(QMainWindow):
 
         # Rating Mode
         self.rating_mode_enabled: bool = False
+        self.btn_rating_mode = None  # Will be created if rating UI is added
         self.viewer_mode_enabled: bool = False
         
         # Initialize Rating Manager
-        if self.current_folder:
-             self.rating_manager = RatingManager(self.current_folder)
-        else:
-             self.rating_manager = None
-
-        # Rating Mode
-        self.rating_mode_enabled: bool = False
-        self.viewer_mode_enabled: bool = False
-        
-        # Initialize Rating Manager
-        if self.current_folder:
-             self.rating_manager = RatingManager(self.current_folder)
-        else:
-             self.rating_manager = None
+        self.rating_manager = None
 
         self.key_down_target: int | None = None
         self.moved_during_key_down: bool = False
 
         self.thumb_thread: QThread | None = None
-        # self.thumb_worker removed (deprecated)
 
         self.undo_stack: list[list[tuple[Path, Path]]] = []
         self.redo_stack: list[list[tuple[Path, Path]]] = []
@@ -108,51 +99,52 @@ class GridSelectorWindow(QMainWindow):
         self._scroll_sync_guard = False
 
         self.language: str = 'ko'
-        self.translations = {
-            'ko': {
-                'title': '시퀀셜 셀럭터',
-                'select_folder': 'Image Folder',
-                'target1': 'Target1',
-                'target2': 'Target2',
-                'zoom_link': '독립 줌 모드',
-                'zoom_link_on': '공통 줌 모드',
-                'help': '도움말',
-                'dual_mode': '듀얼 모드',
-                'single_mode': '단일 모드',
-                'donate': '후원하기',
-                'language': 'English',
-                'organize': '사진 정리',
-                'slot1_prompt': '썸네일 클릭 → Slot1 프리뷰 (위)',
-                'slot2_prompt': 'Ctrl+클릭 → Slot2 프리뷰 (아래)',
-                'empty': 'Empty'
-            },
-            'en': {
-                'title': 'Sequential Selector',
-                'select_folder': 'Image Folder',
-                'target1': 'Target1',
-                'target2': 'Target2',
-                'zoom_link': 'Independent Zoom',
-                'zoom_link_on': 'Linked Zoom',
-                'help': 'Help',
-                'dual_mode': 'Dual Mode',
-                'single_mode': 'Single Mode',
-                'donate': 'Donate',
-                'language': '한국어',
-                'language': '한국어',
-                'organize': 'Move Photos',
-                'slot1_prompt': 'Thumbnail click → Slot1 preview (upper)',
-                'slot1_prompt': 'Thumbnail click → Slot1 preview (upper)',
-                'slot2_prompt': 'Ctrl+Click → Slot2 preview (lower)',
-                'empty': 'Empty'
-            }
-        }
+        self.translations = TRANSLATIONS
 
         self.dual_mode_enabled: bool = False
         self.dual_window: QMainWindow | None = None
 
+        # Path-to-row index map for O(1) thumbnail lookup
+        self._path_to_row: dict[str, int] = {}
+
+        self._preview_cache: OrderedDict[str, Image.Image] = OrderedDict()
+        self._cache_capacity: int = 20
+        self._animations: list[QPropertyAnimation] = []
+
+        try:
+            # Limit workers to prevent UI freeze and IO saturation
+            cpu = os.cpu_count() or 4
+            max_workers = min(cpu, 8) 
+        except Exception:
+            max_workers = 4
+        self.thumb_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self.thumb_load_version: int = 0
+
+        # File Operation Threads Tracking
+        self.active_file_ops = []
+
+        # File Operation Thread/Worker
+        self.file_worker_thread = QThread()
+        self.file_worker = None
+        
+        # Init UI (called once)
         self._setup_ui()
         self._setup_scroll_sync()
-        
+        self._init_layout_sizes()
+
+        # Connect signals after UI is set up
+        self.thumbnail_loaded.connect(self._apply_thumbnail)
+        self.preview_ready.connect(self._on_preview_ready)
+        self.list_widget.thumbSizeChanged.connect(self.on_thumb_size_changed)
+
+        self.last_loaded_thumb_size: int = self.list_widget._thumb_size
+        self._pending_thumb_size: int | None = None
+        self._thumb_reload_timer: QTimer = QTimer(self)
+        self._thumb_reload_timer.setSingleShot(True)
+        self._thumb_reload_timer.setInterval(250)
+        self._thumb_reload_timer.timeout.connect(self._do_thumb_reload)
+
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo_last_move)
 
@@ -161,50 +153,6 @@ class GridSelectorWindow(QMainWindow):
 
         self.dual_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         self.dual_shortcut.activated.connect(self.btn_dual_mode.toggle)
-
-        self._preview_cache: OrderedDict[str, Image.Image] = OrderedDict()
-        self._cache_capacity: int = 20
-        self._animations: list[QPropertyAnimation] = []
-
-        try:
-            # Limit workers to prevent UI freeze and IO saturation
-            # Even on high-core CPUs, disk IO or raw processing can choke the system
-            cpu = os.cpu_count() or 4
-            max_workers = min(cpu, 8) 
-        except Exception:
-            max_workers = 4
-        self.thumb_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2) # Separate high-priority executor
-        self.thumb_load_version: int = 0
-        self.thumbnail_loaded.connect(self._apply_thumbnail)
-        self.preview_ready.connect(self._on_preview_ready)
-
-        self.list_widget.thumbSizeChanged.connect(self.on_thumb_size_changed)
-
-        self.last_loaded_thumb_size: int = self.list_widget._thumb_size
-        self._pending_thumb_size: int | None = None
-        self._thumb_reload_timer: QTimer = QTimer(self)
-        self._thumb_reload_timer.setSingleShot(True)
-        self._thumb_reload_timer.setInterval(250)
-        self._thumb_reload_timer.setInterval(250)
-        self._thumb_reload_timer.timeout.connect(self._do_thumb_reload)
-        
-        self._thumb_reload_timer.timeout.connect(self._do_thumb_reload)
-        
-        # Loading State
-        # self.loading_progress = Signal(int, int) # Unused
-        
-        # File Operation Threads Tracking
-        self.active_file_ops = [] # List of (thread, worker)
-
-        # File Operation Thread/Worker
-        self.file_worker_thread = QThread()
-        self.file_worker = None
-        
-        # Init UI
-        self._init_layout_sizes()
-        self._setup_ui()
-        self._setup_scroll_sync()
 
     def closeEvent(self, event):
         # Clean Shutdown
@@ -270,6 +218,16 @@ class GridSelectorWindow(QMainWindow):
         self.viewer_widget.request_open_folder.connect(self.choose_folder)
         self.viewer_widget.rating_changed.connect(self.rate_current_image) # Re-use existing
         self.main_stack.addWidget(self.viewer_widget)
+        
+        # Page 2: EXIF Frame Editor
+        self.exif_widget = ExifEditorWidget()
+        self.exif_widget.request_close.connect(lambda: self.toggle_exif_mode(False))
+        self.main_stack.addWidget(self.exif_widget)
+
+        # Page 3: Photo Editor
+        self.photo_widget = PhotoEditorWidget()
+        self.photo_widget.request_close.connect(lambda: self.toggle_photo_mode(False))
+        self.main_stack.addWidget(self.photo_widget)
 
         # Left Container
         left_widget = QWidget()
@@ -291,82 +249,105 @@ class GridSelectorWindow(QMainWindow):
         top_btn_layout = QHBoxLayout()
         left_layout.addLayout(top_btn_layout)
 
-        # --- LEFT: Folder Selection ---
-        self.btn_select_folder = QPushButton("Image Folder")
+        # --- LEFT: Folder Selection (Library Mode) ---
+        self.btn_select_folder = QPushButton("📁 Load Folder")
         self.btn_select_folder.setObjectName("SelectFolderBtn")
         self.btn_select_folder.clicked.connect(self.choose_folder)
-        self.btn_select_folder.setFixedHeight(40)
-        self.btn_select_folder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_select_folder.setFixedHeight(36)
+        self.btn_select_folder.setStyleSheet("QPushButton { font-weight: bold; padding: 0 15px; }")
         top_btn_layout.addWidget(self.btn_select_folder)
         
-        top_btn_layout.addStretch(1) # Divider
-
-        # --- CENTER: Modes ---
-        self.btn_viewer_mode = QPushButton("Viewer Mode")
-        self.btn_viewer_mode.setCheckable(True)
-        self.btn_viewer_mode.clicked.connect(self.toggle_viewer_mode)
-        self.btn_viewer_mode.setFixedHeight(40)
-        self.btn_viewer_mode.setObjectName("TonalButton")
-        top_btn_layout.addWidget(self.btn_viewer_mode)
-
-        self.btn_rating_mode = QPushButton("Rating Mode")
-        self.btn_rating_mode.setCheckable(True)
-        self.btn_rating_mode.clicked.connect(self.toggle_rating_mode)
-        self.btn_rating_mode.setFixedHeight(40)
-        self.btn_rating_mode.setObjectName("TonalButton")
-        top_btn_layout.addWidget(self.btn_rating_mode)
-
+        # --- LEFT: Organization (Library Mode) ---
         self.btn_organize = QPushButton("Move Photos")
         self.btn_organize.setCheckable(True) 
         self.btn_organize.clicked.connect(self.toggle_organizer)
-        self.btn_organize.setFixedHeight(40)
+        self.btn_organize.setFixedHeight(36)
         self.btn_organize.setObjectName("PrimaryButton")
         top_btn_layout.addWidget(self.btn_organize)
-        
-        top_btn_layout.addStretch(1) # Divider
 
-        # --- RIGHT: Tools & Targets ---
-        # Targets (Always Visible now as per request)
-        self.btn_target1 = QPushButton("Target1")
+        top_btn_layout.addStretch(1) # Center alignment spacer
+
+        # --- CENTER: Master Mode Selector ---
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(0)
+        
+        self.btn_mode_library = QPushButton("LIBRARY")
+        self.btn_mode_library.setCheckable(True)
+        self.btn_mode_library.setChecked(True)
+        self.btn_mode_library.setFixedHeight(36)
+        
+        self.btn_mode_develop = QPushButton("DEVELOP")
+        self.btn_mode_develop.setCheckable(True)
+        self.btn_mode_develop.setFixedHeight(36)
+        
+        self.btn_mode_export = QPushButton("EXPORT")
+        self.btn_mode_export.setCheckable(True)
+        self.btn_mode_export.setFixedHeight(36)
+        
+        mode_style = """
+            QPushButton { 
+                font-weight: bold; font-size: 13px; color: #888; background: #222; 
+                border: 1px solid #333; padding: 0 20px;
+            }
+            QPushButton:hover { color: #ccc; background: #2a2a2a; }
+            QPushButton:checked { color: white; background: #3a3a3c; border-bottom: 2px solid #4CAF50; }
+        """
+        self.btn_mode_library.setStyleSheet(mode_style)
+        self.btn_mode_develop.setStyleSheet(mode_style)
+        self.btn_mode_export.setStyleSheet(mode_style)
+        
+        mode_layout.addWidget(self.btn_mode_library)
+        mode_layout.addWidget(self.btn_mode_develop)
+        mode_layout.addWidget(self.btn_mode_export)
+        
+        # Connect mode switching
+        self.btn_mode_library.clicked.connect(lambda: self.switch_master_mode("library"))
+        self.btn_mode_develop.clicked.connect(lambda: self.switch_master_mode("develop"))
+        self.btn_mode_export.clicked.connect(lambda: self.switch_master_mode("export"))
+        
+        self.btn_done_mode = QPushButton("✔️ DONE")
+        self.btn_done_mode.setFixedHeight(36)
+        self.btn_done_mode.setStyleSheet("QPushButton { font-weight: bold; font-size: 13px; background-color: #4CAF50; color: white; border-radius: 4px; padding: 0 20px; } QPushButton:hover { background-color: #45a049; }")
+        self.btn_done_mode.clicked.connect(self.on_done_clicked)
+        self.btn_done_mode.hide()
+        
+        # Add directly to main layout instead of a sub-layout that might collapse
+        top_btn_layout.addWidget(self.btn_mode_library)
+        top_btn_layout.addWidget(self.btn_mode_develop)
+        top_btn_layout.addWidget(self.btn_mode_export)
+        top_btn_layout.addWidget(self.btn_done_mode)
+
+        top_btn_layout.addStretch(1) # Right alignment spacer
+
+        # --- RIGHT: Contextual Actions ---
+        # Targets (Library Mode)
+        self.btn_target1 = QPushButton("Target 1")
         self.btn_target1.clicked.connect(self.choose_target1)
-        self.btn_target1.setFixedHeight(40)
+        self.btn_target1.setFixedHeight(36)
         self.btn_target1.setObjectName("TonalButton")
         top_btn_layout.addWidget(self.btn_target1)
 
-        self.btn_target2 = QPushButton("Target2")
+        self.btn_target2 = QPushButton("Target 2")
         self.btn_target2.clicked.connect(self.choose_target2)
-        self.btn_target2.setFixedHeight(40)
+        self.btn_target2.setFixedHeight(36)
         self.btn_target2.setObjectName("TonalButton")
         top_btn_layout.addWidget(self.btn_target2)
 
-        self.btn_filter = QPushButton("Filter")
+        self.btn_filter = QPushButton("Filters")
         self.btn_filter.clicked.connect(self.show_filter_dialog)
-        self.btn_filter.setFixedHeight(40)
+        self.btn_filter.setFixedHeight(36)
         self.btn_filter.setObjectName("TonalButton")
         top_btn_layout.addWidget(self.btn_filter)
 
-        # Clear All Ratings button (only visible in Rating Mode)
         self.btn_clear_ratings = QPushButton("Clear Ratings")
         self.btn_clear_ratings.clicked.connect(self.clear_all_ratings)
-        self.btn_clear_ratings.setFixedHeight(40)
-        self.btn_clear_ratings.setStyleSheet("background-color: #FF4444; color: white; font-weight: bold;")
-        self.btn_clear_ratings.hide()  # Hidden until Rating Mode is on
-        top_btn_layout.addWidget(self.btn_clear_ratings)
-
-        # HQ Reload Button
+        self.btn_clear_ratings.setFixedHeight(36)
+        self.btn_clear_ratings.setStyleSheet("background-color: #FF4444; color: white; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+        
         self.btn_hq = QPushButton("HQ Load")
         self.btn_hq.setFixedWidth(80)
-        self.btn_hq.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50; 
-                color: white; 
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #45a049; }
-            QPushButton:pressed { background-color: #3e8e41; }
-        """)
-        self.btn_hq.setToolTip("Force High Quality Reload")
+        self.btn_hq.setFixedHeight(36)
+        self.btn_hq.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #45a049; }")
         self.btn_hq.clicked.connect(self.force_hq_reload)
         top_btn_layout.addWidget(self.btn_hq)
 
@@ -416,6 +397,7 @@ class GridSelectorWindow(QMainWindow):
         self.list_widget.doubleClickedLeft.connect(lambda item: self.move_item_to_target(item, 1))
         self.list_widget.doubleClickedRight.connect(lambda item: self.move_item_to_target(item, 2))
         self.list_widget.clicked_with_modifiers.connect(self.on_item_clicked_with_modifiers)
+        self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
         
         list_layout_inner.addWidget(self.list_widget)
         shadow = QGraphicsDropShadowEffect()
@@ -469,11 +451,6 @@ class GridSelectorWindow(QMainWindow):
         slot1_wrapper_layout.addWidget(self.slot1_stack)
         
         self.splitter_right.addWidget(slot1_wrapper)
-
-        # Slot 1 - Page 0: Image Preview
-        self.slot1_preview_widget = QWidget()
-        slot1_p_layout = QVBoxLayout(self.slot1_preview_widget)
-        slot1_p_layout.setContentsMargins(0, 0, 0, 0)
 
         # Slot 1 - Page 0: Image Preview
         self.slot1_preview_widget = QWidget()
@@ -700,9 +677,86 @@ class GridSelectorWindow(QMainWindow):
         self.btn_organize.setChecked(False)
         self.toggle_organizer(False)
 
-    def open_organizer(self):
-        self.btn_organize.setChecked(True)
-        self.toggle_organizer(True)
+    def switch_master_mode(self, mode: str):
+        self.btn_mode_library.setChecked(mode == "library")
+        self.btn_mode_develop.setChecked(mode == "develop")
+        self.btn_mode_export.setChecked(mode == "export")
+        
+        # Default visibility (Library Mode)
+        self.btn_target1.show()
+        self.btn_target2.show()
+        self.btn_filter.show()
+        self.btn_organize.show()
+        self.btn_select_folder.show() # Always visible
+        self.btn_hq.show()
+        self.btn_clear_ratings.hide()
+        
+        self.btn_mode_library.show()
+        self.btn_mode_develop.show()
+        self.btn_mode_export.show()
+        self.btn_done_mode.show() if mode != "library" else self.btn_done_mode.hide()
+        
+        # Toggle Checkbox Visibility Mode
+        in_selection_mode = mode in ["develop", "export"]
+        self.list_widget.setSelectionMode(QListWidget.MultiSelection if in_selection_mode else QListWidget.ExtendedSelection)
+        
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            widget = self.list_widget.itemWidget(item)
+            if hasattr(widget, 'show_checkbox'):
+                widget.show_checkbox(in_selection_mode)
+        
+        if mode == "develop":
+            self.btn_target1.hide()
+            self.btn_target2.hide()
+            self.btn_filter.hide()
+            self.btn_organize.hide()
+            self.btn_hq.hide()
+            # If no items selected yet, just let user select in grid until DONE
+            if len(self.list_widget.selectedItems()) > 0:
+                self.toggle_photo_mode(False, force_on=True)
+            else:
+                 self.main_stack.setCurrentIndex(0) 
+            
+        elif mode == "export":
+            self.btn_target1.hide()
+            self.btn_target2.hide()
+            self.btn_filter.hide()
+            self.btn_organize.hide()
+            self.btn_hq.hide()
+            
+            # If no items selected yet, just let user select in grid until DONE
+            if len(self.list_widget.selectedItems()) > 0:
+                self.toggle_exif_mode(False, force_on=True)
+            else:
+                 self.main_stack.setCurrentIndex(0) 
+            
+        else: # library
+            self.main_stack.setCurrentIndex(0)
+
+    def on_done_clicked(self):
+        if len(self.list_widget.selectedItems()) == 0:
+            QMessageBox.warning(self, "No Image Selected", "Please select at least one image before pressing DONE.")
+            return
+            
+        # Hide the Done button when actively entering the editor
+        self.btn_done_mode.hide()
+        
+        # Determine mode
+        if self.btn_mode_develop.isChecked():
+            self.toggle_photo_mode(False, force_on=True)
+        elif self.btn_mode_export.isChecked():
+            self.toggle_exif_mode(False, force_on=True)
+        else:
+            self.switch_master_mode("library")
+
+    def on_selection_changed(self):
+        # Update widget checkboxes visually based on list_widget selection state
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            widget = self.list_widget.itemWidget(item)
+            if hasattr(widget, 'set_selected'):
+                widget.set_selected(item.isSelected())
 
     def undo_last_move(self):
         if not self.undo_stack:
@@ -747,13 +801,8 @@ class GridSelectorWindow(QMainWindow):
              # src_path is the ORIGINAL source. 
              # But if we undid, the file should be back at src_path (or restored name)
              # This is tricky because Undo might have renamed it.
-             # For simplicity, we assume robust users or simple flow.
              # Ideally Undo should return the EXACT restore path it used.
              # For now, we try src_path or typical restore names?
-             
-             # Actually, simpler: just try to move src_path -> dest_path
-             # If src_path missing, maybe checking for restored variants is needed?
-             # Let's trust standard flow for now.
              
              candidate = src_path
              if not candidate.exists():
@@ -820,28 +869,9 @@ class GridSelectorWindow(QMainWindow):
         new_val = max(10, min(300, new_val))
         slider.setValue(new_val)
 
-    def keyPressEvent(self, event):
-        key = event.key()
-
-        # Rating Mode Priority - BLOCKS Move/Target keys
-        if self.rating_mode_enabled and self.rating_manager:
-            if key == Qt.Key_1: self.rate_current_image(1); return
-            elif key == Qt.Key_2: self.rate_current_image(2); return
-            elif key == Qt.Key_3: self.rate_current_image(3); return
-            elif key == Qt.Key_4: self.rate_current_image(4); return
-            elif key == Qt.Key_5: self.rate_current_image(5); return
-            # Consume 1-5, do not fall through
-        
-        # Move/Target Keys (Only if NOT in Rating Mode)
-        if not self.rating_mode_enabled:
-            if key == Qt.Key_1 and self.target_folder1 is not None:
-                self.key_down_target = 1
-                return
-            if key == Qt.Key_2 and self.target_folder2 is not None:
-                self.key_down_target = 2
-                return
-            
-        super().keyPressEvent(event)
+    # keyPressEvent is defined below (after move_selected_to_target) to unify
+    # rating mode, move/target key logic, and key_down_target tracking.
+    # See the single keyPressEvent definition further in this file.
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_1 and self.target_folder1 is not None:
@@ -919,6 +949,7 @@ class GridSelectorWindow(QMainWindow):
     # Updated to accept ask_pairing flag
     def load_folder_grid(self, folder: Path, ask_pairing: bool = False):
         self.list_widget.clear()
+        self._path_to_row.clear()
         self.thumb_load_version += 1
         current_version = self.thumb_load_version
         
@@ -1090,6 +1121,8 @@ class GridSelectorWindow(QMainWindow):
             item.setData(Qt.UserRole, str(f))
             item.setData(Qt.UserRole + 1, [str(s) for s in siblings])
             
+            # Build path-to-row index for O(1) thumbnail lookup
+            self._path_to_row[str(f)] = self.list_widget.count() - 1
             visible_paths.append(str(f))
 
         self.list_widget.scrollToTop()
@@ -1114,21 +1147,26 @@ class GridSelectorWindow(QMainWindow):
     def _load_thumbnail_task(self, path, size, version):
         if version != self.thumb_load_version: return
         try:
-            # Force high-res load by passing max_size
-            # log_debug(f"DEBUG: Loading {path.name} at size {size}")
             img = load_pil_image(Path(path), max_size=size)
             if img:
                 qimg = pil_to_qimage(img)
                 if version == self.thumb_load_version:
                     self.thumbnail_loaded.emit(str(path), qimg)
-        except Exception as e:
-            log_debug(f"DEBUG: Load Fail {e}")
+        except Exception:
             pass
 
     def _apply_thumbnail(self, path, qimg):
         pixmap = QPixmap.fromImage(qimg)
-        count = self.list_widget.count()
-        for i in range(count):
+        row = self._path_to_row.get(path)
+        if row is not None and row < self.list_widget.count():
+            item = self.list_widget.item(row)
+            if item and item.data(Qt.UserRole) == path:
+                widget = self.list_widget.itemWidget(item)
+                if isinstance(widget, ThumbnailWidget):
+                    widget.set_pixmap(pixmap)
+                return
+        # Fallback: linear scan if index is stale
+        for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             if item.data(Qt.UserRole) == path:
                 widget = self.list_widget.itemWidget(item)
@@ -1137,6 +1175,25 @@ class GridSelectorWindow(QMainWindow):
                 break
 
     def on_thumb_size_changed(self, new_size):
+        # Immediately update grid/icon sizes for instant visual feedback
+        pad_w = self.list_widget._grid_padding_w
+        pad_h = self.list_widget._grid_padding_h
+        self.list_widget.setIconSize(QSize(new_size, new_size))
+        self.list_widget.setGridSize(QSize(new_size + pad_w, new_size + pad_h))
+        
+        # Rescale existing pixmaps to new size immediately
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            widget = self.list_widget.itemWidget(item)
+            if isinstance(widget, ThumbnailWidget):
+                widget._size = new_size
+                item.setSizeHint(widget.sizeHint())
+                if widget.pixmap:
+                    widget.lbl_img.setPixmap(widget.pixmap.scaled(
+                        new_size, new_size - 20, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    ))
+        
+        # Debounce image re-fetch for higher resolution
         self._pending_thumb_size = new_size
         self._thumb_reload_timer.start()
 
@@ -1285,12 +1342,14 @@ class GridSelectorWindow(QMainWindow):
         except Exception as e:
              print(f"Preview ready error: {e}")
 
+    # NOTE: _sync_zoom is defined earlier (line ~616) with the correct
+    # GPUImageWidget implementation. This duplicate was removed to prevent override.
+
     def apply_zoom(self, idx, animate=False):
         # Update GPU Widget Zoom
         factor = self.zoom_factors[idx] # e.g. 1.0 = 100%
         widget = self.preview_widget_1 if idx == 0 else self.preview_widget_2
-        # set_zoom expects 10-300 int
-        widget.set_zoom(int(factor * 100))
+        widget.set_zoom_factor(factor)
     
     def update_zoom(self, idx, value):
         factor = value / 100.0
@@ -1367,28 +1426,24 @@ class GridSelectorWindow(QMainWindow):
         else:
             if not self.dual_mode_enabled: return
             
+            # Reparent back to main window BEFORE closing dual_window to avoid destroying C++ objects
+            self.splitter_right.setParent(self.right_widget)
+            self.right_layout.addWidget(self.splitter_right, 1) # Stretch 1
+            
+            self.bottom_widget.setParent(self.right_widget)
+            self.right_layout.addWidget(self.bottom_widget, 0) # Stretch 0
+            
             # Close window if exists
             if self.dual_window:
                 self.dual_window.closeEvent = lambda e: e.accept()
                 self.dual_window.close()
                 self.dual_window = None
             
-            # Restore to main window
+            # Restore to main window visibility
             self.right_widget.show()
             
             # Reset orientation to Vertical
             self.splitter_right.setOrientation(Qt.Vertical)
-            
-            # We want: Splitter then Bottom Widget.
-            # right_widget already has nothing (if we removed them correctly).
-            # But wait, did we remove them or just reparent them?
-            # When adding to dual_layout, they were reparented.
-            
-            self.splitter_right.setParent(self.right_widget)
-            self.right_layout.addWidget(self.splitter_right, 1) # Stretch 1
-            
-            self.bottom_widget.setParent(self.right_widget)
-            self.right_layout.addWidget(self.bottom_widget, 0) # Stretch 0
             
             # Force Layout Update
             self.splitter_right.setSizes([500, 500])
@@ -1449,32 +1504,20 @@ class GridSelectorWindow(QMainWindow):
         # Add explicitly tracked siblings (from fuzzy grouping)
         all_files_to_move.update(hidden_siblings)
 
-        # Legacy Fallback (only if NOT using Pair Mode or if logic requires it)
-        # If pair logic is OFF, we still might want to move XMP sidecars.
-        if not self.pair_mode_enabled:
-            pass # Keep logic below?
-        else:
-            # If Pair Mode is ON, we rely on the grouping logic above mostly.
-            # BUT, we still need to catch .xmp sidecars which are not in the group logic yet?
-            # Our fuzzy logic groups RAW+JPG. But excludes XMP.
-            # So we SHOULD run sidecar detection for XMPs.
-            pass
-            
-        # Run XMP/Sidecar detection for ALL primary files (safety)
+        # XMP/Sidecar detection for ALL primary files
         files_to_scan = list(all_files_to_move)
         for p in files_to_scan:
              parent = p.parent
              stem = p.stem
              try:
-                 # Be careful not to pick up unrelated files if fuzzy logic is used.
-                 # But XMP usually matches stem exactly.
                  for cand in parent.glob(f"{stem}*"):
                      if cand.suffix.lower() in ['.xmp', '.xml'] and cand not in all_files_to_move:
                          all_files_to_move.add(cand)
              except Exception:
                  pass
-        else:
-            # Original logic: Ask user
+
+        # If not in pair mode, also detect associated files (e.g. RAW+JPG with same stem)
+        if not self.pair_mode_enabled:
             siblings_found = []
             for p in primary_files:
                 parent = p.parent
@@ -1534,6 +1577,12 @@ class GridSelectorWindow(QMainWindow):
             for r in sorted(rows_to_remove, reverse=True):
                 self.list_widget.takeItem(r)
 
+            # Rebuild _path_to_row index after removals
+            self._path_to_row.clear()
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                self._path_to_row[item.data(Qt.UserRole)] = i
+
             # Update Undo Stack
             self.undo_stack.append(recorded_moves)
             
@@ -1562,13 +1611,15 @@ class GridSelectorWindow(QMainWindow):
                 self.rate_current_image(5)
                 return
         
-        # Move keys (only when NOT in rating mode)
+        # Move/Target Keys (Only if NOT in Rating Mode)
         if not self.rating_mode_enabled:
-            if key == Qt.Key_1:
-                self.move_selected_to_target(1)
-            elif key == Qt.Key_2:
-                self.move_selected_to_target(2)
-            elif key == Qt.Key_Z and (mods & Qt.ControlModifier):
+            if key == Qt.Key_1 and self.target_folder1 is not None:
+                self.key_down_target = 1
+                return
+            if key == Qt.Key_2 and self.target_folder2 is not None:
+                self.key_down_target = 2
+                return
+            if key == Qt.Key_Z and (mods & Qt.ControlModifier):
                 self.undo_last_move()
             elif key == Qt.Key_Y and (mods & Qt.ControlModifier):
                 self.redo_last_move()
@@ -1687,30 +1738,89 @@ class GridSelectorWindow(QMainWindow):
         dlg.exec()
 
     def toggle_viewer_mode(self, checked):
-        self.viewer_mode_enabled = checked
         if checked:
-             self.btn_viewer_mode.setChecked(True)
-             self.btn_viewer_mode.setText("Exit Viewer")
-             
-             # Switch to Stack Page 1
-             self.main_stack.setCurrentIndex(1)
-             
-             # Load current image into viewer
-             self._load_viewer_image()
-             
-             # Ensure focus for keyboard events
-             self.viewer_widget.setFocus()
+            # Turn OFF Other Modes
+            if self.btn_organize.isChecked():
+                self.btn_organize.setChecked(False)
+            if self.btn_rating_mode is not None and self.btn_rating_mode.isChecked():
+                self.btn_rating_mode.setChecked(False)
+            if hasattr(self, 'btn_mode_develop') and self.btn_mode_develop.isChecked():
+                self.btn_mode_develop.setChecked(False)
+            if hasattr(self, 'btn_mode_export') and self.btn_mode_export.isChecked():
+                self.btn_mode_export.setChecked(False)
+            
+            self.viewer_mode_enabled = True
+            
+            # Switch view to Viewer
+            self.main_stack.setCurrentIndex(1)
+            
+            # Load current image into viewer
+            self._load_viewer_image()
+            
+            self.viewer_widget.setFocus()
         else:
-             self.btn_viewer_mode.setChecked(False)
-             self.btn_viewer_mode.setText("Viewer Mode")
-             self.main_stack.setCurrentIndex(0)
-             
+            self.viewer_mode_enabled = False
+            if hasattr(self, 'btn_viewer_mode') and self.btn_viewer_mode is not None and self.btn_viewer_mode.isChecked():
+                self.btn_viewer_mode.setChecked(False)
+            
+            self.viewer_widget.clear_view()
+            self.main_stack.setCurrentIndex(0)
+            
+            # Force focus back to list
+            self.list_widget.setFocus()
+            
+    def toggle_exif_mode(self, checked=False, force_on=False):
+        if checked or force_on:
+            items = self.list_widget.selectedItems()
+                
+            # Turn OFF Other Modes
+            if self.btn_organize.isChecked():
+                self.btn_organize.setChecked(False)
+            if hasattr(self, 'btn_viewer_mode') and self.btn_viewer_mode.isChecked():
+                self.btn_viewer_mode.setChecked(False)
+                
+            # Load images into EXIF widget
+            paths = [Path(item.data(Qt.UserRole)) for item in items]
+            if paths:
+                self.exif_widget.load_images(paths)
+            
+            self.main_stack.setCurrentIndex(2) # EXIF Editor index
+        else:
+            self.main_stack.setCurrentIndex(0)
+            self.list_widget.setFocus()
+
+    def toggle_photo_mode(self, checked=False, force_on=False):
+        if checked or force_on:
+            items = self.list_widget.selectedItems()
+                
+            # Turn OFF Other Modes
+            if self.btn_organize.isChecked():
+                self.btn_organize.setChecked(False)
+            if hasattr(self, 'btn_viewer_mode') and self.btn_viewer_mode.isChecked():
+                self.btn_viewer_mode.setChecked(False)
+                
+            # Load images into Photo widget
+            paths = [Path(item.data(Qt.UserRole)) for item in items]
+            if paths:
+                self.photo_widget.load_images(paths)
+            
+            self.main_stack.setCurrentIndex(3) # Photo Editor index
+        else:
+            self.main_stack.setCurrentIndex(0)
+            self.list_widget.setFocus()
+
     def _load_viewer_image(self):
         # Get current selection
         items = self.list_widget.selectedItems()
-        if not items: return
-        
-        item = items[0] # Single view focus
+        if not items: 
+            if self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(0)
+                item = self.list_widget.currentItem()
+            else:
+                return
+        else:
+            item = items[0] # Single view focus
+            
         path = Path(item.data(Qt.UserRole))
         
         if not path.exists(): return
@@ -1731,8 +1841,12 @@ class GridSelectorWindow(QMainWindow):
                 if r['filename'] == path.name:
                     rating = r['rating']
                     break
+                    
+        total_items = self.list_widget.count()
+        current_idx = self.list_widget.currentRow() + 1
+        index_str = f"{current_idx} / {total_items}"
         
-        self.viewer_widget.load_image(path, pixmap, rating)
+        self.viewer_widget.load_image(path, pixmap, rating, index_str)
 
     def _load_full_res_pixmap(self, path):
          # Helper to load full res
@@ -1835,7 +1949,7 @@ class GridSelectorWindow(QMainWindow):
             return
             
         dlg = FilterDialog(self, self.rating_manager)
-        if dlg.exec_():
+        if dlg.exec():
             result = dlg.get_filtered_files()
             if result is None:
                 # Reset / Show All
