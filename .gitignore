@@ -35,3 +35,9 @@ env/
 # Project Specific
 debug_output.txt
 path_debug.txt
+debug.log
+dis_out.txt
+dis_widgets.txt
+SequentialSelector-*.zip
+*.log
+tolook/

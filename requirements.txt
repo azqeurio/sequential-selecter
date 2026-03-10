@@ -1,7 +1,16 @@
-﻿PySide6
+﻿# Core dependencies (required)
+PySide6
 Pillow
 rawpy
 pillow-heif
-pyinstaller
-opencv-python
 exifread
+numpy
+opencv-python
+
+# Build tool
+pyinstaller
+
+# Optional: AI Denoising (installed at runtime via app UI)
+# torch
+# torchvision
+# spandrel

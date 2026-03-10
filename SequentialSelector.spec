@@ -1,39 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""
+Compatibility wrapper.
+Use `ssc.spec` for Windows builds and `ssc_macos.spec` for macOS builds.
+"""
 
+import os
 
-a = Analysis(
-    ['run.py'],
-    pathex=[],
-    binaries=[],
-    datas=[('sqs.ico', '.')],
-    hiddenimports=['pillow_heif', 'rawpy', 'PySide6'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    noarchive=False,
-    optimize=0,
-)
-pyz = PYZ(a.pure)
+_BASE = os.path.dirname(os.path.abspath(__file__))
+_WINDOWS_SPEC = os.path.join(_BASE, "ssc.spec")
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='SequentialSelector',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['sqs.ico'],
-)
+if not os.path.exists(_WINDOWS_SPEC):
+    raise FileNotFoundError(f"Missing spec file: {_WINDOWS_SPEC}")
+
+with open(_WINDOWS_SPEC, "r", encoding="utf-8") as f:
+    exec(compile(f.read(), _WINDOWS_SPEC, "exec"), globals(), locals())
