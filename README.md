@@ -20,13 +20,13 @@ A powerful all-in-one desktop photo workflow app for fast culling, editing, webp
 - **공통/독립 줌 모드** — 두 뷰어의 줌 상태를 동기화하거나 독립적으로 운용 가능
 - 화살표 키 탐색 지원
 
-### ⭐  등급분류 (Rating & Filtering)
+###   등급분류 (Rating & Filtering)
 - **1–5 Star 별점** 
 - **Reject (X)** 처리로 불필요한 사진 빠르게 걸러내기
 - 필터링 패널을 통해 원하는 등급의 사진만 모아보기
 - 그리드 뷰에서 바로 평점 매기기 지원
 
-### 🎨 사진 에디터 (Photo Editor)
+###  사진 에디터 (Photo Editor)
 간단한 편집 기능:
 
 - **색보정** — 노출, 대비, 하이라이트, 섀도, 화이트, 블랙, 선명도, 채도, 활력, 색온도, 색조, 안개 제거, 비네팅, 입자, 샤프닝
@@ -38,7 +38,7 @@ A powerful all-in-one desktop photo workflow app for fast culling, editing, webp
 - **일괄 적용 & 내보내기** — 현재 편집을 모든 이미지에 적용 후 일괄 내보내기 (WebP / JPG / PNG, 품질·크기 설정)
 
 
-### 🖼️  프레임 에디터
+###   프레임 에디터
 사진에 여백·촬영 정보를 삽입하는  프레임 :
 
 - **자동 EXIF 추출** — 카메라 기종, 렌즈, 조리개, 셔터스피드, ISO
@@ -49,7 +49,7 @@ A powerful all-in-one desktop photo workflow app for fast culling, editing, webp
 - **프리셋 저장/불러오기** — JSON으로 레이아웃 저장 및 재사용
 - **카메라 로고 추가**
 
-### 📂 사진 정리기 (Photo Organizer)
+###  사진 정리기 (Photo Organizer)
 SD 카드나 폴더 내 사진을 자동 분류:
 
 - 카메라 / 렌즈 / 날짜 / 파일 유형 기반 폴더 구조 생성
@@ -58,14 +58,14 @@ SD 카드나 폴더 내 사진을 자동 분류:
 - 중복 정책: 묻기 / 건너뛰기 / 새 이름 저장
 - 복사 또는 이동 선택
 
-### 🚀 일괄 처리 & 안전장치
+###  일괄 처리 & 안전장치
 - 여러 장의 사진을 선택 후 일괄 Export
 - 드래그 앤 드롭 및 단축키(1, 2)로 Target 폴더에 사진 이동
 - Multi-Threading으로 UI 블로킹 없는 부드러운 처리
 - `Ctrl + Z`로 파일 이동 즉시 취소 가능
 - 이름 충돌 시 자동 안전한 이름 부여
 
-### 🌐 다국어 지원
+###  다국어 지원
 - 한국어 / English 실시간 전환
 
 ## 지원 이미지 포맷
@@ -77,7 +77,7 @@ SD 카드나 폴더 내 사진을 자동 분류:
 
 ---
 
-## 💻 설치 및 실행
+##  설치 및 실행
 
 ### Windows (설치 파일)
 GitHub **Releases** 탭에서 `.exe` 파일 다운로드 → Python 설치 없이 바로 실행
@@ -138,20 +138,20 @@ pyinstaller ssc_macos.spec
 
 ## Key Features
 
-### 📸 Fast Grid & Dual Viewer
+###  Fast Grid & Dual Viewer
 - **Grid View** — Seamlessly load hundreds of photos (Ctrl + Wheel to resize thumbnails)
 - **Dual Preview Slots** — Compare two images side-by-side with mouse-drag panning
 - **Persistent Zoom/Pan** — Zoom position preserved across photo navigation
 - **Linked / Independent Zoom** — Sync or decouple zoom across both viewers
 - Arrow key navigation
 
-### ⭐ Professional Rating & Filtering
+###  Professional Rating & Filtering
 - **1–5 Star ratings** and **Color labels** (Red, Yellow, Green, Blue, Purple)
 - **Reject (X)** tagging for quick culling
 - Filter panel to show only specific ratings or approved photos
 - Rate directly from grid view
 
-### 🎨 Photo Editor
+###  Photo Editor
 Professional Lightroom-style photo editing:
 
 - **Color Science** — Exposure, contrast, highlights, shadows, whites, blacks, clarity, saturation, vibrance, temperature, tint, dehaze, vignette, grain, sharpening
@@ -166,7 +166,7 @@ Professional Lightroom-style photo editing:
 - **Batch Apply & Export** — Apply current edits to all images, export as WebP/JPG/PNG with quality and size options
 - **Undo / Redo** — Full Ctrl+Z / Ctrl+Y support for all edits
 
-### 🖼️ EXIF Frame Editor
+###  EXIF Frame Editor
 Add stylish borders with shooting info to your photos:
 
 - **Auto EXIF extraction** — Camera body, lens, aperture, shutter speed, ISO
@@ -177,7 +177,7 @@ Add stylish borders with shooting info to your photos:
 - **Preset Save/Load** — Store layouts as JSON for reuse
 - **Camera Logo Support**
 
-### 📂 Photo Organizer
+###  Photo Organizer
 Automatically sort photos from SD cards or folders:
 
 - Organize by camera / lens / date / file type
@@ -186,14 +186,14 @@ Automatically sort photos from SD cards or folders:
 - Duplicate policy: Ask / Skip / Rename
 - Copy or Move mode
 
-### 🚀 Batch Pipeline & Safety
+###  Batch Pipeline & Safety
 - Batch export with EXIF frames applied
 - Drag-and-drop or keyboard shortcuts (1, 2) to move to target folders
 - Multi-threaded processing without UI freezing
 - `Ctrl + Z` to instantly undo file moves
 - Automatic safe filename on conflicts
 
-### 🌐 Bilingual Interface
+###  Bilingual Interface
 - Korean / English real-time language toggle
 
 ## Supported Formats
@@ -205,7 +205,7 @@ Automatically sort photos from SD cards or folders:
 
 ---
 
-## 💻 Installation
+##  Installation
 
 ### Windows (Prebuilt)
 Download the `.exe` from the GitHub **Releases** tab — no Python required.
@@ -255,3 +255,4 @@ pyinstaller ssc_macos.spec
 
 ## License
 This software is distributed under the **MIT License**. Feel free to use and contribute!
+
